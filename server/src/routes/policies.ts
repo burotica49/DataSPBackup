@@ -14,6 +14,8 @@ const base = {
   compression: z.enum(["none", "gzip", "zstd"]).optional(),
   encrypt: z.boolean().optional(),
   verify_after: z.boolean().optional(),
+  notify_success: z.boolean().optional(),
+  notify_failure: z.boolean().optional(),
   enabled: z.boolean().optional(),
 };
 const createSchema = z.object({
@@ -51,6 +53,8 @@ export async function policyRoutes(app: FastifyInstance): Promise<void> {
       compression: d.compression ?? "zstd",
       encrypt: (d.encrypt ?? true) ? 1 : 0,
       verify_after: (d.verify_after ?? true) ? 1 : 0,
+      notify_success: (d.notify_success ?? false) ? 1 : 0,
+      notify_failure: (d.notify_failure ?? true) ? 1 : 0,
       enabled: (d.enabled ?? true) ? 1 : 0,
     });
     reloadSchedules();
@@ -76,6 +80,8 @@ export async function policyRoutes(app: FastifyInstance): Promise<void> {
     if (d.compression !== undefined) patch.compression = d.compression;
     if (d.encrypt !== undefined) patch.encrypt = d.encrypt ? 1 : 0;
     if (d.verify_after !== undefined) patch.verify_after = d.verify_after ? 1 : 0;
+    if (d.notify_success !== undefined) patch.notify_success = d.notify_success ? 1 : 0;
+    if (d.notify_failure !== undefined) patch.notify_failure = d.notify_failure ? 1 : 0;
     if (d.enabled !== undefined) patch.enabled = d.enabled ? 1 : 0;
     policies.update(id, patch);
     reloadSchedules();

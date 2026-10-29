@@ -5,6 +5,7 @@ import type {
   BackupStatus,
   DatabaseSource,
   NotificationChannel,
+  Restore,
   Storage,
   User,
   Verification,
@@ -54,9 +55,11 @@ export const databases = {
       .prepare(
         `INSERT INTO databases
           (name, engine, host, port, db_name, username, password_enc,
-           ssl_mode, included_schemas, is_supabase)
+           ssl_mode, included_schemas, excluded_tables, excluded_table_data,
+           ignore_user_mappings, is_supabase)
          VALUES (@name, @engine, @host, @port, @db_name, @username,
-                 @password_enc, @ssl_mode, @included_schemas, @is_supabase)`,
+                 @password_enc, @ssl_mode, @included_schemas, @excluded_tables,
+                 @excluded_table_data, @ignore_user_mappings, @is_supabase)`,
       )
       .run({
         name: d.name,
@@ -68,6 +71,9 @@ export const databases = {
         password_enc: d.password_enc,
         ssl_mode: d.ssl_mode ?? "prefer",
         included_schemas: d.included_schemas ?? "[]",
+        excluded_tables: d.excluded_tables ?? "[]",
+        excluded_table_data: d.excluded_table_data ?? "[]",
+        ignore_user_mappings: d.ignore_user_mappings ?? 0,
         is_supabase: d.is_supabase ?? 0,
       });
     return this.get(Number(info.lastInsertRowid))!;
@@ -89,6 +95,9 @@ export const databases = {
       "password_enc",
       "ssl_mode",
       "included_schemas",
+      "excluded_tables",
+      "excluded_table_data",
+      "ignore_user_mappings",
       "is_supabase",
     ] as const;
     const keys = allowed.filter((k) => patch[k] !== undefined);
@@ -146,9 +155,11 @@ export const policies = {
       .prepare(
         `INSERT INTO backup_policies
           (database_id, storage_id, schedule_cron, retention_count,
-           retention_days, compression, encrypt, verify_after, enabled)
+           retention_days, compression, encrypt, verify_after,
+           notify_success, notify_failure, enabled)
          VALUES (@database_id, @storage_id, @schedule_cron, @retention_count,
-                 @retention_days, @compression, @encrypt, @verify_after, @enabled)`,
+                 @retention_days, @compression, @encrypt, @verify_after,
+                 @notify_success, @notify_failure, @enabled)`,
       )
       .run({
         database_id: p.database_id,
@@ -159,6 +170,8 @@ export const policies = {
         compression: p.compression ?? "zstd",
         encrypt: p.encrypt ?? 1,
         verify_after: p.verify_after ?? 1,
+        notify_success: p.notify_success ?? 0,
+        notify_failure: p.notify_failure ?? 1,
         enabled: p.enabled ?? 1,
       });
     return this.get(Number(info.lastInsertRowid))!;
@@ -172,6 +185,8 @@ export const policies = {
       "compression",
       "encrypt",
       "verify_after",
+      "notify_success",
+      "notify_failure",
       "enabled",
     ] as const;
     const keys = allowed.filter((k) => patch[k] !== undefined);
@@ -283,6 +298,39 @@ export const verifications = {
   },
   markStatus(id: number, status: VerificationStatus): void {
     this.update(id, { status });
+  },
+};
+
+// --- Restores --------------------------------------------------------------
+export const restores = {
+  list(backupId?: number): Restore[] {
+    if (backupId != null) {
+      return getDb()
+        .prepare("SELECT * FROM restores WHERE backup_id = ? ORDER BY created_at DESC")
+        .all(backupId) as Restore[];
+    }
+    return getDb()
+      .prepare("SELECT * FROM restores ORDER BY created_at DESC")
+      .all() as Restore[];
+  },
+  get(id: number): Restore | undefined {
+    return getDb()
+      .prepare("SELECT * FROM restores WHERE id = ?")
+      .get(id) as Restore | undefined;
+  },
+  create(backupId: number, mode: string, targetLabel: string): Restore {
+    const info = getDb()
+      .prepare(
+        "INSERT INTO restores (backup_id, mode, target_label, status) VALUES (?, ?, ?, 'pending')",
+      )
+      .run(backupId, mode, targetLabel);
+    return this.get(Number(info.lastInsertRowid))!;
+  },
+  update(id: number, patch: Partial<Restore>): void {
+    const keys = Object.keys(patch);
+    if (!keys.length) return;
+    const set = keys.map((k) => `${k} = @${k}`).join(", ");
+    getDb().prepare(`UPDATE restores SET ${set} WHERE id = @id`).run({ ...patch, id });
   },
 };
 

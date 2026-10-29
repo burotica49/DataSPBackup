@@ -27,6 +27,16 @@ describe("parseRestoreErrors", () => {
     expect(r.categorized[0]?.blocking).toBe(false);
   });
 
+  it("considère les privilèges par défaut Supabase comme bénins", () => {
+    const stderr =
+      "pg_restore: error: could not execute query: ERROR:  permission denied to change default privileges";
+    const r = parseRestoreErrors(stderr);
+    expect(r.blockingCount).toBe(0);
+    expect(r.rootError).toBeNull();
+    expect(r.categorized[0]?.category).toBe("default-privileges");
+    expect(r.categorized[0]?.blocking).toBe(false);
+  });
+
   it("détecte le conflit PostGIS / DROP SCHEMA public", () => {
     const stderr =
       "pg_restore: error: ERROR:  cannot drop schema public because other objects depend on it";

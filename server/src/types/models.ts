@@ -16,7 +16,10 @@ export interface DatabaseSource {
   username: string;
   password_enc: string;
   ssl_mode: string;
-  included_schemas: string; // JSON array
+  included_schemas: string; // JSON array ; [] = tous
+  excluded_tables: string; // JSON array — --exclude-table
+  excluded_table_data: string; // JSON array — --exclude-table-data
+  ignore_user_mappings: number;
   is_supabase: number;
   pg_major: number | null;
   created_at: string;
@@ -41,6 +44,8 @@ export interface BackupPolicy {
   compression: "none" | "gzip" | "zstd";
   encrypt: number;
   verify_after: number;
+  notify_success: number;
+  notify_failure: number;
   enabled: number;
   created_at: string;
 }
@@ -89,6 +94,21 @@ export interface Verification {
   errors_json: string | null;
   root_error: string | null;
   report_json: string | null;
+  created_at: string;
+}
+
+export interface Restore {
+  id: number;
+  backup_id: number;
+  mode: "existing" | "new";
+  target_label: string;
+  status: "pending" | "running" | "success" | "failed";
+  exit_code: number | null;
+  root_error: string | null;
+  errors_json: string | null;
+  report_json: string | null;
+  started_at: string | null;
+  finished_at: string | null;
   created_at: string;
 }
 

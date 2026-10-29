@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseToc } from "./archive.js";
+import { parseToc, tocExcludingUserMappings } from "./archive.js";
 
 // Extrait réaliste de `pg_restore -l` d'une archive Supabase.
 const TOC = `;
@@ -36,5 +36,18 @@ describe("parseToc", () => {
     // Aucune de ces lignes ne doit polluer schémas/extensions.
     expect(r.schemas).toEqual([]);
     expect(r.extensions).toEqual([]);
+  });
+});
+
+describe("tocExcludingUserMappings", () => {
+  it("commente uniquement les correspondances d'utilisateurs", () => {
+    const toc = `210; 1259 16456 TABLE public items postgres
+4567; 0 0 USER MAPPING - USER MAPPING postgres SERVER fdw postgres
+3456; 0 16456 TABLE DATA public items postgres`;
+    const out = tocExcludingUserMappings(toc);
+    expect(out.split("\n")[0]).toBe("210; 1259 16456 TABLE public items postgres");
+    expect(out.split("\n")[1]?.startsWith(";")).toBe(true);
+    expect(out).toContain("USER MAPPING");
+    expect(out.split("\n")[2]).toBe("3456; 0 16456 TABLE DATA public items postgres");
   });
 });

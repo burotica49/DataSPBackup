@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { onUnmounted, ref, watch } from "vue";
 import { api } from "../lib/api";
+
+const props = defineProps<{ id: number }>();
+const emit = defineEmits<{ focus: [databaseId: number] }>();
 
 interface CatError {
   category: string; count: number; sample: string; hint: string; blocking: boolean;
 }
 interface Verif {
-  id: number; status: string; exit_code: number | null;
+  id: number; database_id: number; status: string; exit_code: number | null;
   schema_count: number | null; table_count: number | null;
   restored_size_bytes: number | null; root_error: string | null;
   row_counts: Record<string, number>;
@@ -15,29 +17,31 @@ interface Verif {
   report: any;
 }
 
-const route = useRoute();
-const router = useRouter();
 const v = ref<Verif | null>(null);
 let timer: number | undefined;
 
+function statusLabel(s: string): string {
+  return s === "success" ? "Réussie" : s === "failed" ? "Échouée" : s === "running" ? "En cours" : s === "pending" ? "En attente" : s === "canceled" ? "Annulée" : s;
+}
+
 async function load() {
-  v.value = await api.get<Verif>(`/api/verifications/${route.params.id}`);
-  if (v.value && !["success", "failed", "canceled"].includes(v.value.status)) {
+  clearTimeout(timer);
+  v.value = await api.get<Verif>(`/api/verifications/${props.id}`);
+  emit("focus", v.value.database_id);
+  if (!["success", "failed", "canceled"].includes(v.value.status)) {
     timer = window.setTimeout(load, 1500);
   }
 }
-onMounted(load);
+watch(() => props.id, () => { v.value = null; load(); }, { immediate: true });
 onUnmounted(() => clearTimeout(timer));
 </script>
 
 <template>
-  <div class="page">
-  <button class="btn secondary" style="margin-bottom:16px" @click="router.back()">← Retour</button>
   <div v-if="v">
-    <h1>
+    <h2 style="padding-right:36px">
       Vérification #{{ v.id }}
-      <span class="badge" :class="v.status" style="margin-left: 10px">{{ v.status }}</span>
-    </h1>
+      <span class="badge" :class="v.status" style="margin-left: 10px">{{ statusLabel(v.status) }}</span>
+    </h2>
 
     <div class="row">
       <div class="card"><div class="muted">Schémas</div><div style="font-size: 24px; font-weight: 700">{{ v.schema_count ?? "—" }}</div></div>
@@ -108,5 +112,4 @@ onUnmounted(() => clearTimeout(timer));
     </div>
   </div>
   <p v-else class="muted">Chargement…</p>
-  </div>
 </template>

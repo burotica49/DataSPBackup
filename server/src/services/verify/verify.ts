@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, rm, stat } from "node:fs/promises";
+import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { posix } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -17,7 +17,7 @@ import {
   startDisposablePostgres,
   waitForPostgres,
 } from "../docker/docker.js";
-import { inspectArchive } from "./archive.js";
+import { inspectArchive, tocExcludingUserMappings } from "./archive.js";
 import { parseRestoreErrors } from "./errors.js";
 import { buildPrepPlan } from "./supabasePrep.js";
 import { introspectSource } from "./sourceIntrospect.js";
@@ -90,6 +90,7 @@ export async function runVerification(verificationId: number): Promise<void> {
   let container: Awaited<ReturnType<typeof startDisposablePostgres>> | null =
     null;
   let tempRel: string | null = null;
+  let listRel: string | null = null;
 
   try {
     // 1. Rendre l'archive accessible en clair dans le volume de données.
@@ -157,6 +158,16 @@ export async function runVerification(verificationId: number): Promise<void> {
     );
 
     // 7. Restauration (on continue sur erreurs pour les catégoriser).
+    if (source.ignore_user_mappings === 1) {
+      listRel = posix.join("tmp", `verify-${verificationId}-${suffix}.list`);
+      await mkdir(dirname(paths(listRel).host), { recursive: true });
+      await writeFile(
+        paths(listRel).host,
+        tocExcludingUserMappings(inspection.raw),
+        "utf8",
+      );
+      mark("correspondances d'utilisateurs ignorées");
+    }
     const restore = await execInContainer(container, [
       "pg_restore",
       "-U",
@@ -165,6 +176,7 @@ export async function runVerification(verificationId: number): Promise<void> {
       TARGET_DB,
       "--no-password",
       "--verbose",
+      ...(listRel ? ["-L", paths(listRel).container] : []),
       archiveContainerPath,
     ]);
     mark(`restauration terminée (code ${restore.exitCode})`);
@@ -229,6 +241,7 @@ export async function runVerification(verificationId: number): Promise<void> {
   } finally {
     if (container) await removeContainer(container);
     if (tempRel) await rm(paths(tempRel).host, { force: true }).catch(() => {});
+    if (listRel) await rm(paths(listRel).host, { force: true }).catch(() => {});
   }
 }
 

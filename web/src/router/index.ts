@@ -32,13 +32,15 @@ const router = createRouter({
     },
     {
       path: "/backups/:id",
-      name: "backup",
-      component: () => import("../views/BackupDetailView.vue"),
+      redirect: (to) => ({ path: "/", query: { detail: "backup", id: String(to.params.id) } }),
     },
     {
       path: "/verifications/:id",
-      name: "verification",
-      component: () => import("../views/VerificationView.vue"),
+      redirect: (to) => ({ path: "/", query: { detail: "verification", id: String(to.params.id) } }),
+    },
+    {
+      path: "/restores/:id",
+      redirect: (to) => ({ path: "/", query: { detail: "restore", id: String(to.params.id) } }),
     },
   ],
 });

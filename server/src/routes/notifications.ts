@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { channels } from "../models/repo.js";
-import { encryptString } from "../services/crypto/crypto.js";
+import { decryptString, encryptString } from "../services/crypto/crypto.js";
 import { testChannel } from "../services/notify/notify.js";
 import type { NotificationChannel } from "../types/models.js";
 import { requireAuth } from "../lib/auth.js";
@@ -30,6 +30,27 @@ function publicView(c: NotificationChannel) {
   const { config_enc, ...rest } = c;
   void config_enc;
   return rest;
+}
+
+/** Fusionne la config envoyée dans l'existante. Une valeur vide conserve le secret déjà stocké. */
+function mergeConfig(currentEnc: string, incoming: Record<string, unknown>): string {
+  let prev: Record<string, unknown> = {};
+  if (currentEnc) {
+    try {
+      const parsed = JSON.parse(decryptString(currentEnc)) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        prev = parsed as Record<string, unknown>;
+      }
+    } catch {
+      prev = {};
+    }
+  }
+  const merged: Record<string, unknown> = { ...prev };
+  for (const [k, v] of Object.entries(incoming)) {
+    if (v === "" || v === null || v === undefined) continue;
+    merged[k] = v;
+  }
+  return encryptString(JSON.stringify(merged));
 }
 
 export async function notificationRoutes(app: FastifyInstance): Promise<void> {
@@ -68,7 +89,7 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
     const patch: Record<string, unknown> = {};
     if (d.name !== undefined) patch.name = d.name;
     if (d.config !== undefined) {
-      patch.config_enc = encryptString(JSON.stringify(d.config));
+      patch.config_enc = mergeConfig(channels.get(id)!.config_enc, d.config);
     }
     if (d.on_start !== undefined) patch.on_start = d.on_start ? 1 : 0;
     if (d.on_success !== undefined) patch.on_success = d.on_success ? 1 : 0;

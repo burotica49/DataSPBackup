@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { api } from "../lib/api";
 import { useToasts } from "../store/toasts";
 
@@ -17,6 +17,7 @@ const list = ref<Policy[]>([]);
 const dbs = ref<Db[]>([]);
 const stores = ref<Store[]>([]);
 const showForm = ref(false);
+const editingId = ref<number | null>(null);
 
 const CRON_PRESETS = [
   { label: "Toutes les heures", value: "0 * * * *" },
@@ -31,8 +32,23 @@ const blank = () => ({
   encrypt: true, verify_after: true, enabled: true,
 });
 const form = ref(blank());
+const presetValue = computed(() =>
+  CRON_PRESETS.some((p) => p.value === form.value.schedule_cron) ? form.value.schedule_cron : "",
+);
 
 function dbName(id: number) { return dbs.value.find((d) => d.id === id)?.name ?? "#" + id; }
+
+function payload() {
+  return {
+    storage_id: Number(form.value.storage_id),
+    schedule_cron: form.value.schedule_cron,
+    retention_count: form.value.retention_count ? Number(form.value.retention_count) : null,
+    retention_days: form.value.retention_days ? Number(form.value.retention_days) : null,
+    encrypt: form.value.encrypt,
+    verify_after: form.value.verify_after,
+    enabled: form.value.enabled,
+  };
+}
 
 async function load() {
   [list.value, dbs.value, stores.value] = await Promise.all([
@@ -42,28 +58,47 @@ async function load() {
   ]);
 }
 function openCreate() {
+  editingId.value = null;
   form.value = blank();
   if (dbs.value[0]) form.value.database_id = dbs.value[0].id;
   if (stores.value[0]) form.value.storage_id = stores.value[0].id;
   showForm.value = true;
 }
-async function create() {
+function openEdit(p: Policy) {
+  editingId.value = p.id;
+  form.value = {
+    database_id: p.database_id,
+    storage_id: p.storage_id,
+    schedule_cron: p.schedule_cron,
+    retention_count: p.retention_count,
+    retention_days: p.retention_days,
+    encrypt: p.encrypt === 1,
+    verify_after: p.verify_after === 1,
+    enabled: p.enabled === 1,
+  };
+  showForm.value = true;
+}
+function closeForm() {
+  showForm.value = false;
+  editingId.value = null;
+}
+async function save() {
+  const editing = editingId.value;
   try {
-    await api.post("/api/policies", {
-      database_id: Number(form.value.database_id),
-      storage_id: Number(form.value.storage_id),
-      schedule_cron: form.value.schedule_cron,
-      retention_count: form.value.retention_count ? Number(form.value.retention_count) : null,
-      retention_days: form.value.retention_days ? Number(form.value.retention_days) : null,
-      encrypt: form.value.encrypt,
-      verify_after: form.value.verify_after,
-      enabled: form.value.enabled,
-    });
-    showForm.value = false;
-    toasts.success("Planification créée");
+    if (editing) {
+      await api.patch(`/api/policies/${editing}`, payload());
+      toasts.success("Planification enregistrée");
+    } else {
+      await api.post("/api/policies", {
+        database_id: Number(form.value.database_id),
+        ...payload(),
+      });
+      toasts.success("Planification créée");
+    }
+    closeForm();
     await load();
   } catch (e) {
-    toasts.error("Création impossible : " + (e as { message?: string }).message);
+    toasts.error((editing ? "Enregistrement" : "Création") + " impossible : " + (e as { message?: string }).message);
   }
 }
 async function toggle(p: Policy) {
@@ -72,7 +107,7 @@ async function toggle(p: Policy) {
 }
 async function runNow(p: Policy) {
   await api.post(`/api/policies/${p.id}/run`);
-  toasts.info(`Sauvegarde lancée — ${dbName(p.database_id)}`, { to: "/backups", label: "Voir" });
+  toasts.info(`Sauvegarde lancée — ${dbName(p.database_id)}`, { to: `/?db=${p.database_id}&tab=backups`, label: "Voir" });
 }
 async function remove(id: number) {
   if (!confirm("Supprimer cette planification ?")) return;
@@ -90,11 +125,11 @@ onMounted(load);
   <p v-if="!dbs.length" class="muted">Ajoute d'abord une base dans l'onglet Bases.</p>
 
   <div v-if="showForm" class="card" style="margin-top: 16px">
-    <h2>Nouvelle planification</h2>
+    <h2>{{ editingId ? "Modifier la planification" : "Nouvelle planification" }}</h2>
     <div class="row">
       <div>
         <label>Base</label>
-        <select v-model="form.database_id">
+        <select v-model="form.database_id" :disabled="!!editingId">
           <option v-for="d in dbs" :key="d.id" :value="d.id">{{ d.name }}</option>
         </select>
       </div>
@@ -108,8 +143,9 @@ onMounted(load);
     <div class="row">
       <div>
         <label>Fréquence</label>
-        <select @change="form.schedule_cron = ($event.target as HTMLSelectElement).value">
-          <option v-for="p in CRON_PRESETS" :key="p.value" :value="p.value" :selected="p.value === form.schedule_cron">{{ p.label }}</option>
+        <select :value="presetValue" @change="form.schedule_cron = ($event.target as HTMLSelectElement).value">
+          <option v-if="!presetValue" value="" disabled>Personnalisée</option>
+          <option v-for="p in CRON_PRESETS" :key="p.value" :value="p.value">{{ p.label }}</option>
         </select>
       </div>
       <div>
@@ -127,8 +163,8 @@ onMounted(load);
       <label style="display: flex; gap: 6px; align-items: center"><input type="checkbox" v-model="form.enabled" style="width: auto" /> Activée</label>
     </div>
     <div style="margin-top: 14px">
-      <button class="btn" @click="create">Créer</button>
-      <button class="btn secondary" style="margin-left: 8px" @click="showForm = false">Annuler</button>
+      <button class="btn" @click="save">{{ editingId ? "Enregistrer" : "Créer" }}</button>
+      <button class="btn secondary" style="margin-left: 8px" @click="closeForm">Annuler</button>
     </div>
   </div>
 
@@ -150,8 +186,13 @@ onMounted(load);
           <td>{{ p.verify_after ? "oui" : "non" }}</td>
           <td><input type="checkbox" :checked="p.enabled === 1" @change="toggle(p)" /></td>
           <td style="white-space: nowrap">
-            <button class="btn secondary" @click="runNow(p)">Exécuter</button>
-            <button class="btn danger" style="margin-left: 6px" @click="remove(p.id)">×</button>
+            <div style="display: flex; align-items: stretch; gap: 6px">
+              <button class="icon-btn" title="Modifier" style="width: 35px; height: auto" @click="openEdit(p)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+              </button>
+              <button class="btn secondary" @click="runNow(p)">Exécuter</button>
+              <button class="btn danger" @click="remove(p.id)">×</button>
+            </div>
           </td>
         </tr>
         <tr v-if="!list.length"><td colspan="6" class="muted">Aucune planification.</td></tr>

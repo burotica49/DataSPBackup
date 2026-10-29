@@ -1,12 +1,27 @@
 import { logger } from "../../lib/logger.js";
-import { backups, databases, verifications } from "../../models/repo.js";
+import { backups, databases, policies, restores, verifications } from "../../models/repo.js";
 import { runBackup } from "../backup/backup.js";
 import { enforceRetention } from "../backup/retention.js";
 import { runVerification } from "../verify/verify.js";
+import { runRestore, type RestoreOptions } from "../restore/restore.js";
 import { notifyEvent } from "../notify/notify.js";
 
 function dbLabel(databaseId: number): string {
   return databases.get(databaseId)?.name ?? `#${databaseId}`;
+}
+
+/**
+ * Une sauvegarde manuelle notifie toujours (selon les canaux) ; une sauvegarde
+ * de politique respecte en plus les cases notify_success/notify_failure.
+ */
+function policyWantsNotify(
+  policyId: number | undefined,
+  event: "success" | "failure",
+): boolean {
+  if (policyId == null) return true;
+  const p = policies.get(policyId);
+  if (!p) return true;
+  return event === "success" ? p.notify_success === 1 : p.notify_failure === 1;
 }
 
 /**
@@ -67,13 +82,15 @@ export function requestBackup(req: BackupRequest): { backupId: number } {
     })
     .then(async () => {
       const b = backups.get(backup.id);
-      await notifyEvent("success", {
-        title: `Sauvegarde réussie — ${label}`,
-        message:
-          `Sauvegarde #${backup.id} terminée` +
-          (b?.size_bytes ? ` (${Math.round(b.size_bytes / 1024)} Ko).` : "."),
-        level: "success",
-      });
+      if (policyWantsNotify(req.policyId, "success")) {
+        await notifyEvent("success", {
+          title: `Sauvegarde réussie — ${label}`,
+          message:
+            `Sauvegarde #${backup.id} terminée` +
+            (b?.size_bytes ? ` (${Math.round(b.size_bytes / 1024)} Ko).` : "."),
+          level: "success",
+        });
+      }
       if (req.policyId != null) {
         await enforceRetention(req.policyId).catch(() => undefined);
       }
@@ -81,11 +98,13 @@ export function requestBackup(req: BackupRequest): { backupId: number } {
     })
     .catch(async () => {
       const b = backups.get(backup.id);
-      await notifyEvent("failure", {
-        title: `Sauvegarde échouée — ${label}`,
-        message: `Sauvegarde #${backup.id} : ${b?.error ?? "erreur inconnue"}`,
-        level: "error",
-      });
+      if (policyWantsNotify(req.policyId, "failure")) {
+        await notifyEvent("failure", {
+          title: `Sauvegarde échouée — ${label}`,
+          message: `Sauvegarde #${backup.id} : ${b?.error ?? "erreur inconnue"}`,
+          level: "error",
+        });
+      }
     });
   return { backupId: backup.id };
 }
@@ -100,8 +119,12 @@ export function requestVerification(
     logger.warn({ backupId }, "Vérification ignorée: sauvegarde non réussie");
     return null;
   }
-  const v = verifications.create(backupId, backup.database_id, trigger);
-  const label = dbLabel(backup.database_id);
+  return enqueueVerification(backupId, backup.database_id, trigger);
+}
+
+function enqueueVerification(backupId: number, databaseId: number, trigger: string): { verificationId: number } {
+  const v = verifications.create(backupId, databaseId, trigger);
+  const label = dbLabel(databaseId);
   jobQueue
     .enqueue(`verify#${v.id}`, async () => {
       await runVerification(v.id);
@@ -125,4 +148,21 @@ export function requestVerification(
     })
     .catch(() => undefined);
   return { verificationId: v.id };
+}
+
+/** Lance une restauration vers une base de destination (existante ou nouvelle). */
+export function requestRestore(opts: RestoreOptions): { restoreId: number } {
+  let label = opts.mode === "existing" ? "base existante" : "nouvelle base";
+  if (opts.mode === "existing" && opts.targetDatabaseId != null) {
+    const td = databases.get(opts.targetDatabaseId);
+    if (td) label = `${td.db_name}@${td.host}`;
+  } else if (opts.mode === "new" && opts.serverDatabaseId != null) {
+    const sd = databases.get(opts.serverDatabaseId);
+    if (sd) label = `${opts.newDbName}@${sd.host} (nouvelle)`;
+  }
+  const rec = restores.create(opts.backupId, opts.mode, label);
+  jobQueue
+    .enqueue(`restore#${rec.id}`, () => runRestore(rec.id, opts))
+    .catch(() => undefined);
+  return { restoreId: rec.id };
 }

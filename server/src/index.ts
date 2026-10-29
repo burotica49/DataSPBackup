@@ -14,6 +14,7 @@ import { authRoutes } from "./routes/auth.js";
 import { databaseRoutes } from "./routes/databases.js";
 import { backupRoutes } from "./routes/backups.js";
 import { verificationRoutes } from "./routes/verifications.js";
+import { restoreRoutes } from "./routes/restores.js";
 import { storageRoutes } from "./routes/storages.js";
 import { policyRoutes } from "./routes/policies.js";
 import { settingsRoutes } from "./routes/settings.js";
@@ -58,6 +59,7 @@ async function main(): Promise<void> {
   await app.register(databaseRoutes);
   await app.register(backupRoutes);
   await app.register(verificationRoutes);
+  await app.register(restoreRoutes);
   await app.register(storageRoutes);
   await app.register(policyRoutes);
   await app.register(settingsRoutes);

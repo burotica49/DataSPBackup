@@ -4,6 +4,7 @@ import { useRouter } from "vue-router";
 import { useAuth } from "./store/auth";
 import { useActivity } from "./store/activity";
 import ToastHost from "./components/ToastHost.vue";
+import { version } from "../../package.json";
 
 const auth = useAuth();
 const activity = useActivity();
@@ -24,9 +25,9 @@ async function logout() {
   <div v-if="loggedIn" class="app">
     <header class="topbar">
       <div class="logo">D</div>
-      <div class="brand">datasp<span>backup</span></div>
+      <div class="brand">DataSP<span>Backup</span><small class="ver">v{{ version }}</small></div>
       <div class="spacer"></div>
-      <span class="top-link">Sauvegarde PostgreSQL + vérification Supabase</span>
+      <!-- <span class="top-link">Sauvegarde PostgreSQL + vérification Supabase</span> -->
       <span class="user">{{ auth.user?.email }}</span>
       <button class="btn secondary" @click="logout">Déconnexion</button>
     </header>

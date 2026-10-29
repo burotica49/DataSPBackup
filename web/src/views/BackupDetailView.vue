@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { onUnmounted, ref, watch } from "vue";
 import { api } from "../lib/api";
 import { useToasts } from "../store/toasts";
 
-const route = useRoute();
-const router = useRouter();
+const props = defineProps<{ id: number }>();
+const emit = defineEmits<{
+  close: [];
+  open: [kind: "verification", id: number];
+  deleted: [];
+  focus: [databaseId: number];
+}>();
+
 const toasts = useToasts();
 
 interface Backup {
@@ -18,6 +23,7 @@ interface Verif { id: number; status: string; }
 
 const b = ref<Backup | null>(null);
 const verif = ref<Verif | null>(null);
+const showDelConfirm = ref(false);
 let timer: number | undefined;
 
 function parse(d: string | null) { if (!d) return NaN; return Date.parse(/[TZ]/.test(d) ? d : d + "Z"); }
@@ -37,10 +43,12 @@ function statusLabel(s: string): string {
 }
 
 async function load() {
-  b.value = await api.get<Backup>(`/api/backups/${route.params.id}`);
-  const vs = await api.get<Verif[]>(`/api/verifications?backup_id=${route.params.id}`);
+  clearTimeout(timer);
+  b.value = await api.get<Backup>(`/api/backups/${props.id}`);
+  emit("focus", b.value.database_id);
+  const vs = await api.get<Verif[]>(`/api/verifications?backup_id=${props.id}`);
   verif.value = vs[0] ?? null;
-  if (b.value && (b.value.status === "running" || b.value.status === "pending")) {
+  if (b.value.status === "running" || b.value.status === "pending") {
     timer = window.setTimeout(load, 1500);
   }
 }
@@ -52,56 +60,77 @@ async function verifyNow() {
     setTimeout(load, 800);
   } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
 }
-onMounted(load);
+async function confirmDel() {
+  if (!b.value) return;
+  showDelConfirm.value = false;
+  try {
+    await api.del(`/api/backups/${b.value.id}`);
+    toasts.success("Sauvegarde supprimée");
+    emit("deleted");
+    emit("close");
+  } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
+}
+watch(() => props.id, () => { b.value = null; load(); }, { immediate: true });
 onUnmounted(() => clearTimeout(timer));
 </script>
 
 <template>
-  <div class="page">
-    <button class="btn secondary" style="margin-bottom:16px" @click="router.back()">← Retour</button>
+  <div v-if="b">
+    <h2 style="display:flex;align-items:center;gap:12px;padding-right:36px">
+      Sauvegarde #{{ b.id }}
+      <span class="badge" :class="b.status">{{ statusLabel(b.status) }}</span>
+    </h2>
+    <div class="toolbar" style="margin-top:12px">
+      <a v-if="b.status==='success'" class="btn secondary" :href="`/api/backups/${b.id}/download`">Télécharger</a>
+      <button class="btn danger" @click="showDelConfirm=true">Supprimer</button>
+    </div>
 
-    <div v-if="b">
-      <h1 style="display:flex;align-items:center;gap:12px">
-        Sauvegarde #{{ b.id }}
-        <span class="badge" :class="b.status">{{ statusLabel(b.status) }}</span>
-      </h1>
+    <div class="row" style="margin-top:16px">
+      <div class="card"><div class="muted">Taille</div><div style="font-size:22px;font-weight:700">{{ fmtSize(b.size_bytes) }}</div></div>
+      <div class="card"><div class="muted">Durée</div><div style="font-size:22px;font-weight:700">{{ fmtDuration(b.started_at, b.finished_at) }}</div></div>
+      <div class="card"><div class="muted">Version PG</div><div style="font-size:22px;font-weight:700">{{ b.pg_major ?? "—" }}</div></div>
+    </div>
 
-      <div class="row" style="margin-top:16px">
-        <div class="card"><div class="muted">Taille</div><div style="font-size:22px;font-weight:700">{{ fmtSize(b.size_bytes) }}</div></div>
-        <div class="card"><div class="muted">Durée</div><div style="font-size:22px;font-weight:700">{{ fmtDuration(b.started_at, b.finished_at) }}</div></div>
-        <div class="card"><div class="muted">Version PG</div><div style="font-size:22px;font-weight:700">{{ b.pg_major ?? "—" }}</div></div>
-      </div>
+    <div class="card">
+      <h2>Détails</h2>
+      <div class="field"><span class="k">Statut</span><span class="v"><span class="badge" :class="b.status">{{ statusLabel(b.status) }}</span></span></div>
+      <div class="field"><span class="k">Déclenchement</span><span class="v">{{ b.trigger }}</span></div>
+      <div class="field"><span class="k">Créée le</span><span class="v">{{ fmtDate(b.created_at) }}</span></div>
+      <div class="field"><span class="k">Démarrée</span><span class="v">{{ fmtDate(b.started_at) }}</span></div>
+      <div class="field"><span class="k">Terminée</span><span class="v">{{ fmtDate(b.finished_at) }}</span></div>
+      <div class="field"><span class="k">Chiffrement</span><span class="v">{{ b.encrypted ? "AES-256-GCM" : "Non chiffrée" }}</span></div>
+      <div class="field"><span class="k">Schémas</span><span class="v">{{ b.schemas_json ? (JSON.parse(b.schemas_json).join(", ") || "toutes") : "—" }}</span></div>
+      <div class="field"><span class="k">Fichier</span><span class="v"><code v-if="b.file_path">{{ b.file_path }}</code><span v-else>—</span></span></div>
+      <div class="field"><span class="k">Checksum (sha256)</span><span class="v"><code v-if="b.checksum">{{ b.checksum }}</code><span v-else>—</span></span></div>
+    </div>
 
-      <div class="card">
-        <h2>Détails</h2>
-        <div class="field"><span class="k">Statut</span><span class="v"><span class="badge" :class="b.status">{{ statusLabel(b.status) }}</span></span></div>
-        <div class="field"><span class="k">Déclenchement</span><span class="v">{{ b.trigger }}</span></div>
-        <div class="field"><span class="k">Créée le</span><span class="v">{{ fmtDate(b.created_at) }}</span></div>
-        <div class="field"><span class="k">Démarrée</span><span class="v">{{ fmtDate(b.started_at) }}</span></div>
-        <div class="field"><span class="k">Terminée</span><span class="v">{{ fmtDate(b.finished_at) }}</span></div>
-        <div class="field"><span class="k">Chiffrement</span><span class="v">{{ b.encrypted ? "AES-256-GCM" : "Non chiffrée" }}</span></div>
-        <div class="field"><span class="k">Schémas</span><span class="v">{{ b.schemas_json ? (JSON.parse(b.schemas_json).join(", ") || "toutes") : "—" }}</span></div>
-        <div class="field"><span class="k">Fichier</span><span class="v"><code v-if="b.file_path">{{ b.file_path }}</code><span v-else>—</span></span></div>
-        <div class="field"><span class="k">Checksum (sha256)</span><span class="v"><code v-if="b.checksum">{{ b.checksum }}</code><span v-else>—</span></span></div>
-      </div>
+    <div v-if="b.error" class="card" style="border-color:var(--danger)">
+      <h2 style="color:var(--danger)">Erreur</h2>
+      <code style="display:block;white-space:pre-wrap">{{ b.error }}</code>
+    </div>
 
-      <div v-if="b.error" class="card" style="border-color:var(--danger)">
-        <h2 style="color:var(--danger)">Erreur</h2>
-        <code style="display:block;white-space:pre-wrap">{{ b.error }}</code>
-      </div>
+    <div class="card">
+      <h2>Vérification de restauration</h2>
+      <template v-if="verif">
+        <p>Statut : <span class="badge" :class="verif.status">{{ verif.status === 'success' ? 'Réussie' : verif.status === 'failed' ? 'Échouée' : verif.status }}</span></p>
+        <button class="btn secondary" @click="emit('open', 'verification', verif.id)">Voir le rapport</button>
+      </template>
+      <template v-else>
+        <p class="muted">Aucune vérification pour cette sauvegarde.</p>
+        <button v-if="b.status==='success'" class="btn" @click="verifyNow">Vérifier maintenant</button>
+      </template>
+    </div>
+  </div>
+  <p v-else class="muted">Chargement…</p>
 
-      <div class="card">
-        <h2>Vérification de restauration</h2>
-        <template v-if="verif">
-          <p>Statut : <span class="badge" :class="verif.status">{{ verif.status === 'success' ? 'Réussie' : verif.status === 'failed' ? 'Échouée' : verif.status }}</span></p>
-          <RouterLink class="btn secondary" :to="`/verifications/${verif.id}`">Voir le rapport</RouterLink>
-        </template>
-        <template v-else>
-          <p class="muted">Aucune vérification pour cette sauvegarde.</p>
-          <button v-if="b.status==='success'" class="btn" @click="verifyNow">Vérifier maintenant</button>
-        </template>
+  <div v-if="showDelConfirm" class="modal-overlay" style="z-index:1200" @click.self="showDelConfirm=false">
+    <div class="modal" style="width:400px">
+      <h2>Confirmation</h2>
+      <p>Supprimer cette sauvegarde et ses vérifications ?</p>
+      <div style="margin-top:16px;display:flex;gap:8px">
+        <button class="btn danger" @click="confirmDel">Supprimer</button>
+        <button class="btn secondary" @click="showDelConfirm=false">Annuler</button>
       </div>
     </div>
-    <p v-else class="muted">Chargement…</p>
   </div>
 </template>

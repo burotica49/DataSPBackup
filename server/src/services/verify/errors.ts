@@ -101,6 +101,15 @@ const RULES: Rule[] = [
     hint: () => `DROP d'un objet absent, ignoré. Sans conséquence.`,
     blocking: false,
   },
+  {
+    category: "default-privileges",
+    test: /permission denied to change default privileges/i,
+    hint: () =>
+      `Le rôle connecté ne peut pas modifier les privilèges par défaut ` +
+      `(ALTER DEFAULT PRIVILEGES, souvent ceux de supabase_admin). ` +
+      `Les tables et les données sont restaurées ; sur une base Supabase ces privilèges sont déjà en place.`,
+    blocking: false,
+  },
 ];
 
 export interface ParsedErrors {

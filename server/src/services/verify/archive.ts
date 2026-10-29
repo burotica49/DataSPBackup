@@ -20,6 +20,19 @@ export interface ArchiveInspection {
 
 const SCHEMA_LINE = /^\d+;\s+\d+\s+\d+\s+SCHEMA\s+-\s+(\S+)/;
 const EXTENSION_LINE = /^\d+;\s+\d+\s+\d+\s+EXTENSION\s+-\s+(\S+)/;
+const USER_MAPPING_LINE = /^\d+;\s+\d+\s+\d+\s+USER MAPPING\b/;
+
+/**
+ * Commenter les entrées USER MAPPING du TOC (`pg_restore -L` ignore
+ * les lignes préfixées par « ; »). La structure FDW reste, pas les
+ * correspondances d'utilisateurs.
+ */
+export function tocExcludingUserMappings(toc: string): string {
+  return toc
+    .split("\n")
+    .map((line) => (USER_MAPPING_LINE.test(line.trimStart()) ? `;${line}` : line))
+    .join("\n");
+}
 
 export async function inspectArchive(
   image: string,

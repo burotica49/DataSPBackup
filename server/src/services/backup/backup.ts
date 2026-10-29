@@ -15,6 +15,7 @@ import {
   resolveImage,
   runEphemeral,
 } from "../docker/docker.js";
+import { parseNameList, pgDumpFilterArgs } from "./dumpArgs.js";
 
 function hostPath(rel: string): string {
   return join(config.dataDir, rel);
@@ -87,8 +88,7 @@ export async function runBackup(
 
     await mkdir(dirname(hostPath(plainRel)), { recursive: true });
 
-    const includedSchemas: string[] = JSON.parse(source.included_schemas || "[]");
-    const schemaArgs = includedSchemas.flatMap((s) => ["-n", s]);
+    const filterArgs = pgDumpFilterArgs(source);
     const pw = decryptString(source.password_enc);
 
     // pg_dump écrit dans le volume de données partagé.
@@ -109,7 +109,7 @@ export async function runBackup(
         source.db_name,
         "-Fc",
         "--no-password",
-        ...schemaArgs,
+        ...filterArgs,
         "-f",
         containerPath(plainRel),
       ],
@@ -145,7 +145,7 @@ export async function runBackup(
       file_path: finalRel,
       encrypted: encrypt ? 1 : 0,
       pg_major: major,
-      schemas_json: JSON.stringify(includedSchemas),
+      schemas_json: JSON.stringify(parseNameList(source.included_schemas)),
       checksum,
     });
     logger.info({ backupId, size, major, encrypt }, "Sauvegarde terminée");

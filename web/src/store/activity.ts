@@ -11,7 +11,14 @@ interface Backup {
 interface Verif {
   id: number;
   backup_id: number;
+  database_id: number;
   status: string;
+  root_error: string | null;
+}
+interface Restore {
+  id: number;
+  status: string;
+  target_label: string;
   root_error: string | null;
 }
 
@@ -26,14 +33,16 @@ export const useActivity = defineStore("activity", () => {
   const toasts = useToasts();
   const backupStatus = new Map<number, string>();
   const verifStatus = new Map<number, string>();
+  const restoreStatus = new Map<number, string>();
   let primed = false;
   let timer: number | undefined;
 
   async function tick(): Promise<void> {
     try {
-      const [backups, verifs] = await Promise.all([
+      const [backups, verifs, rests] = await Promise.all([
         api.get<Backup[]>("/api/backups"),
         api.get<Verif[]>("/api/verifications"),
+        api.get<Restore[]>("/api/restores"),
       ]);
 
       for (const b of backups) {
@@ -42,13 +51,13 @@ export const useActivity = defineStore("activity", () => {
         if (!primed || prev === b.status) continue;
         if (b.status === "success") {
           toasts.success(`Sauvegarde #${b.id} réussie`, {
-            to: "/backups",
-            label: "Voir les sauvegardes",
+            to: `/?db=${b.database_id}&tab=backups&detail=backup&id=${b.id}`,
+            label: "Voir",
           });
         } else if (b.status === "failed") {
           toasts.error(
             `Sauvegarde #${b.id} échouée${b.error ? " : " + b.error : ""}`,
-            { to: "/backups", label: "Voir les sauvegardes" },
+            { to: `/?db=${b.database_id}&tab=backups&detail=backup&id=${b.id}`, label: "Voir" },
           );
         }
       }
@@ -59,14 +68,25 @@ export const useActivity = defineStore("activity", () => {
         if (!primed || prev === v.status || !TERMINAL.has(v.status)) continue;
         if (v.status === "success") {
           toasts.success(`Vérification #${v.id} réussie`, {
-            to: `/verifications/${v.id}`,
+            to: `/?db=${v.database_id}&tab=verifs&detail=verification&id=${v.id}`,
             label: "Voir le rapport",
           });
         } else if (v.status === "failed") {
           toasts.error(`Vérification #${v.id} échouée`, {
-            to: `/verifications/${v.id}`,
+            to: `/?db=${v.database_id}&tab=verifs&detail=verification&id=${v.id}`,
             label: "Voir le rapport",
           });
+        }
+      }
+
+      for (const r of rests) {
+        const prev = restoreStatus.get(r.id);
+        restoreStatus.set(r.id, r.status);
+        if (!primed || prev === r.status || !TERMINAL.has(r.status)) continue;
+        if (r.status === "success") {
+          toasts.success(`Restauration réussie → ${r.target_label}`, { to: `/?detail=restore&id=${r.id}`, label: "Voir" });
+        } else if (r.status === "failed") {
+          toasts.error(`Restauration échouée → ${r.target_label}`, { to: `/?detail=restore&id=${r.id}`, label: "Voir" });
         }
       }
 
@@ -87,6 +107,7 @@ export const useActivity = defineStore("activity", () => {
     primed = false;
     backupStatus.clear();
     verifStatus.clear();
+    restoreStatus.clear();
   }
 
   return { start, stop };
