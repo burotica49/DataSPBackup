@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Data & runtime (NEVER commit backups or the metadata DB)
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Logs
+*.log
+logs/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp

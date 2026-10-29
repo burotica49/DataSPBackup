@@ -1,0 +1,35 @@
+# dataspbackup — déploiement en un conteneur.
+#
+# La vérification de restauration crée des conteneurs PostgreSQL *jetables*
+# sur le même démon Docker via le socket monté. Ces conteneurs partagent le
+# volume de données nommé pour lire les archives de sauvegarde.
+services:
+  dataspbackup:
+    build: .
+    image: dataspbackup:latest
+    container_name: dataspbackup
+    restart: unless-stopped
+    ports:
+      - "4005:4005"
+    environment:
+      PORT: 4005
+      DATA_DIR: /data
+      MASTER_KEY: ${MASTER_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      DOCKER_SOCKET: /var/run/docker.sock
+      # Nom du volume de données tel que vu par le démon Docker : les conteneurs
+      # jetables le montent pour accéder aux fichiers d'archive.
+      VERIFY_DATA_VOLUME: dataspbackup_data
+      VERIFY_PG_IMAGE: ${VERIFY_PG_IMAGE:-postgis/postgis:{major}-3.5}
+      VERIFY_PG_IMAGE_FALLBACK: ${VERIFY_PG_IMAGE_FALLBACK:-postgres:{major}}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - data:/data
+      # Accès au démon Docker pour piloter les conteneurs jetables.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  data:
+    name: dataspbackup_data

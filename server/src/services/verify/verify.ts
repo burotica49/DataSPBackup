@@ -1,0 +1,314 @@
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdir, rm, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { posix } from "node:path";
+import { pipeline } from "node:stream/promises";
+import { randomBytes } from "node:crypto";
+import { config } from "../../config.js";
+import { logger } from "../../lib/logger.js";
+import { backups, databases, verifications } from "../../models/repo.js";
+import { decryptString, createDecryptStream } from "../crypto/crypto.js";
+import {
+  dataMount,
+  execInContainer,
+  pickVerifyImage,
+  removeContainer,
+  runEphemeral,
+  startDisposablePostgres,
+  waitForPostgres,
+} from "../docker/docker.js";
+import { inspectArchive } from "./archive.js";
+import { parseRestoreErrors } from "./errors.js";
+import { buildPrepPlan } from "./supabasePrep.js";
+import { introspectSource } from "./sourceIntrospect.js";
+
+const TARGET_DB = "verifydb";
+
+/** Convertit un chemin relatif (au DATA_DIR) en chemin hôte et conteneur. */
+function paths(relPath: string): { host: string; container: string } {
+  return {
+    host: join(config.dataDir, relPath),
+    container: posix.join("/data", relPath.split(/[\\/]/).join("/")),
+  };
+}
+
+/** Exécute un script SQL (multi-instructions / méta-commandes) via psql. */
+async function psql(
+  container: Parameters<typeof execInContainer>[0],
+  db: string,
+  script: string,
+) {
+  return execInContainer(container, [
+    "bash",
+    "-lc",
+    `psql -U postgres -d ${db} -v ON_ERROR_STOP=0 -At <<'DATASP_EOSQL'\n${script}\nDATASP_EOSQL`,
+  ]);
+}
+
+export interface VerifyReport {
+  image: string;
+  bundledImage: boolean;
+  platform?: string;
+  pgMajor: number;
+  prep: { roles: string[]; schemas: string[]; extensions: string[] };
+  archiveSchemas: string[];
+  archiveExtensions: string[];
+  restore: { exitCode: number };
+  counts: { schemas: number; tables: number; rows: Record<string, number> };
+  comparison: {
+    source: Record<string, number>;
+    diffs: Array<{ table: string; source: number; restored: number }>;
+    withinTolerance: boolean;
+  };
+  timeline: Array<{ step: string; at: string }>;
+}
+
+/**
+ * Exécute une vérification de restauration complète dans une cible jetable
+ * préparée pour Supabase. Ne touche JAMAIS à la base source (lecture seule).
+ */
+export async function runVerification(verificationId: number): Promise<void> {
+  const v = verifications.get(verificationId);
+  if (!v) throw new Error(`Vérification ${verificationId} introuvable`);
+  const backup = backups.get(v.backup_id);
+  const source = databases.get(v.database_id);
+  if (!backup || !source) throw new Error("Sauvegarde ou source introuvable");
+  if (!backup.file_path) throw new Error("La sauvegarde n'a pas de fichier");
+
+  const timeline: VerifyReport["timeline"] = [];
+  const mark = (step: string) =>
+    timeline.push({ step, at: new Date().toISOString() });
+
+  verifications.update(verificationId, {
+    status: "running",
+    started_at: new Date().toISOString(),
+  });
+
+  const major = backup.pg_major ?? source.pg_major ?? 15;
+  const suffix = randomBytes(4).toString("hex");
+  const containerName = `dataspbackup-verify-${verificationId}-${suffix}`;
+  let container: Awaited<ReturnType<typeof startDisposablePostgres>> | null =
+    null;
+  let tempRel: string | null = null;
+
+  try {
+    // 1. Rendre l'archive accessible en clair dans le volume de données.
+    let archiveRel = backup.file_path;
+    if (backup.encrypted) {
+      tempRel = posix.join("tmp", `verify-${verificationId}-${suffix}.dump`);
+      const dst = paths(tempRel).host;
+      await mkdir(dirname(dst), { recursive: true });
+      await pipeline(
+        createReadStream(paths(backup.file_path).host),
+        createDecryptStream(),
+        createWriteStream(dst),
+      );
+      archiveRel = tempRel;
+      mark("archive déchiffrée");
+    }
+    const archiveContainerPath = paths(archiveRel).container;
+
+    // 2. Choix de l'image (PostGIS + contrib ; amd64 émulé si pas d'arm64).
+    const { image, bundled, platform } = await pickVerifyImage(major);
+    mark(`image prête: ${image}${platform ? ` (${platform})` : ""}`);
+
+    // 3. Introspection de l'archive (schémas, extensions, rôles).
+    const inspection = await inspectArchive(image, archiveContainerPath, platform);
+    mark(
+      `archive inspectée: ${inspection.schemas.length} schémas, ` +
+        `${inspection.extensions.length} extensions`,
+    );
+
+    // Introspection de la source en direct : rôles + extensions (source de
+    // vérité, car Supabase ne les met pas dans le dump).
+    const sourceIntro = await introspectSource(image, source, platform);
+    mark(
+      `source introspectée: ${sourceIntro.roles.length} rôles, ` +
+        `${sourceIntro.extensions.length} extensions`,
+    );
+
+    // 4. Démarrer la cible jetable.
+    const superPw = randomBytes(12).toString("hex");
+    container = await startDisposablePostgres({
+      image,
+      name: containerName,
+      superuserPassword: superPw,
+      binds: [dataMount(true)],
+      platform,
+    });
+    await waitForPostgres(container);
+    mark("cible jetable démarrée");
+
+    // 5. Base cible VIDE (pas de --clean, pas de DROP SCHEMA public).
+    await psql(
+      container,
+      "postgres",
+      `DROP DATABASE IF EXISTS ${TARGET_DB};\nCREATE DATABASE ${TARGET_DB};`,
+    );
+
+    // 6. Préparer rôles / schéma extensions / extensions AVANT restauration.
+    const prep = buildPrepPlan(sourceIntro, inspection, source.is_supabase === 1);
+    if (prep.sql.trim()) {
+      await psql(container, TARGET_DB, prep.sql);
+    }
+    mark(
+      `cible préparée: ${prep.roles.length} rôles, ` +
+        `${prep.extensions.length} extensions`,
+    );
+
+    // 7. Restauration (on continue sur erreurs pour les catégoriser).
+    const restore = await execInContainer(container, [
+      "pg_restore",
+      "-U",
+      "postgres",
+      "-d",
+      TARGET_DB,
+      "--no-password",
+      "--verbose",
+      archiveContainerPath,
+    ]);
+    mark(`restauration terminée (code ${restore.exitCode})`);
+
+    const parsed = parseRestoreErrors(restore.stderr);
+
+    // 8. Comptages dans la cible restaurée.
+    const counts = await countRestored(container);
+
+    // 9. Comparaison avec la source (vivante → tolérance).
+    const comparison = await compareWithSource(image, source, counts.rows, platform);
+
+    const report: VerifyReport = {
+      image,
+      bundledImage: bundled,
+      platform,
+      pgMajor: major,
+      prep: {
+        roles: prep.roles,
+        schemas: prep.schemas,
+        extensions: prep.extensions.map((e) => e.name),
+      },
+      archiveSchemas: inspection.schemas,
+      archiveExtensions: inspection.extensions,
+      restore: { exitCode: restore.exitCode },
+      counts,
+      comparison,
+      timeline,
+    };
+
+    // Succès décidé par les erreurs BLOQUANTES, pas par le code de sortie 1.
+    const ok = parsed.blockingCount === 0 && comparison.withinTolerance;
+    verifications.update(verificationId, {
+      status: ok ? "success" : "failed",
+      finished_at: new Date().toISOString(),
+      exit_code: restore.exitCode,
+      restored_size_bytes: counts.sizeBytes ?? null,
+      schema_count: counts.schemas,
+      table_count: counts.tables,
+      row_counts_json: JSON.stringify(counts.rows),
+      errors_json: JSON.stringify(parsed.categorized),
+      root_error: parsed.rootError,
+      report_json: JSON.stringify(report),
+    });
+    logger.info(
+      {
+        verificationId,
+        ok,
+        blocking: parsed.blockingCount,
+        ignored: parsed.ignoredCount,
+      },
+      "Vérification terminée",
+    );
+  } catch (err) {
+    verifications.update(verificationId, {
+      status: "failed",
+      finished_at: new Date().toISOString(),
+      root_error: String(err),
+      report_json: JSON.stringify({ timeline, fatal: String(err) }),
+    });
+    logger.error({ verificationId, err: String(err) }, "Vérification échouée");
+  } finally {
+    if (container) await removeContainer(container);
+    if (tempRel) await rm(paths(tempRel).host, { force: true }).catch(() => {});
+  }
+}
+
+interface RestoredCounts {
+  schemas: number;
+  tables: number;
+  rows: Record<string, number>;
+  sizeBytes: number | null;
+}
+
+async function countRestored(
+  container: Parameters<typeof execInContainer>[0],
+): Promise<RestoredCounts> {
+  // Compte exact par table via génération dynamique (\gexec).
+  const res = await psql(
+    container,
+    TARGET_DB,
+    `SELECT 'SELECT '''||schemaname||'.'||tablename||''' AS t, count(*) AS c FROM '||quote_ident(schemaname)||'.'||quote_ident(tablename)
+     FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')
+     ORDER BY 1 \\gexec`,
+  );
+  const rows: Record<string, number> = {};
+  for (const line of res.stdout.split("\n")) {
+    const [t, c] = line.split("|");
+    if (t && c != null && /^\d+$/.test(c.trim())) rows[t] = Number(c.trim());
+  }
+  const schemas = new Set(Object.keys(rows).map((k) => k.split(".")[0])).size;
+  const size = await psql(
+    container,
+    TARGET_DB,
+    `SELECT pg_database_size('${TARGET_DB}')`,
+  );
+  const sizeBytes = Number((size.stdout.match(/\d+/) ?? ["0"])[0]) || null;
+  return { schemas, tables: Object.keys(rows).length, rows, sizeBytes };
+}
+
+async function compareWithSource(
+  image: string,
+  source: ReturnType<typeof databases.get> & object,
+  restoredRows: Record<string, number>,
+  platform?: string,
+): Promise<VerifyReport["comparison"]> {
+  // Tolérance : la source continue de vivre, on accepte un écart raisonnable.
+  const TOLERANCE_RATIO = 0.1;
+  const TOLERANCE_ABS = 100;
+  const sourceRows: Record<string, number> = {};
+  try {
+    const pw = decryptString(source.password_enc);
+    const res = await runEphemeral({
+      image,
+      entrypoint: "",
+      platform,
+      env: { PGPASSWORD: pw },
+      cmd: [
+        "bash",
+        "-lc",
+        `psql -h ${source.host} -p ${source.port} -U ${source.username} -d ${source.db_name} -At <<'EOSQL'
+SELECT 'SELECT '''||schemaname||'.'||tablename||''' AS t, count(*) AS c FROM '||quote_ident(schemaname)||'.'||quote_ident(tablename) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema') ORDER BY 1 \\gexec
+EOSQL`,
+      ],
+    });
+    for (const line of res.stdout.split("\n")) {
+      const [t, c] = line.split("|");
+      if (t && c != null && /^\d+$/.test(c.trim())) sourceRows[t] = Number(c.trim());
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Comparaison source impossible");
+  }
+
+  const diffs: VerifyReport["comparison"]["diffs"] = [];
+  let withinTolerance = true;
+  for (const [table, srcCount] of Object.entries(sourceRows)) {
+    const restored = restoredRows[table] ?? 0;
+    const allowed = Math.max(TOLERANCE_ABS, srcCount * TOLERANCE_RATIO);
+    if (restored < srcCount - allowed) {
+      withinTolerance = false;
+      diffs.push({ table, source: srcCount, restored });
+    }
+  }
+  // Si la source est injoignable, ne pas invalider sur la seule comparaison.
+  if (Object.keys(sourceRows).length === 0) withinTolerance = true;
+  return { source: sourceRows, diffs, withinTolerance };
+}

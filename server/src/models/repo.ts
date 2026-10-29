@@ -1,0 +1,362 @@
+import { getDb } from "../db/index.js";
+import type {
+  Backup,
+  BackupPolicy,
+  BackupStatus,
+  DatabaseSource,
+  NotificationChannel,
+  Storage,
+  User,
+  Verification,
+  VerificationStatus,
+} from "../types/models.js";
+
+/** Accès typé aux métadonnées. Toutes les écritures passent par ici. */
+
+// --- Users -----------------------------------------------------------------
+export const users = {
+  findByEmail(email: string): User | undefined {
+    return getDb()
+      .prepare("SELECT * FROM users WHERE email = ?")
+      .get(email) as User | undefined;
+  },
+  count(): number {
+    return (
+      getDb().prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number }
+    ).n;
+  },
+  create(email: string, passwordHash: string, role = "owner"): User {
+    const info = getDb()
+      .prepare(
+        "INSERT INTO users (email, password_hash, role) VALUES (?, ?, ?)",
+      )
+      .run(email, passwordHash, role);
+    return getDb()
+      .prepare("SELECT * FROM users WHERE id = ?")
+      .get(info.lastInsertRowid) as User;
+  },
+};
+
+// --- Databases -------------------------------------------------------------
+export const databases = {
+  list(): DatabaseSource[] {
+    return getDb()
+      .prepare("SELECT * FROM databases ORDER BY name")
+      .all() as DatabaseSource[];
+  },
+  get(id: number): DatabaseSource | undefined {
+    return getDb()
+      .prepare("SELECT * FROM databases WHERE id = ?")
+      .get(id) as DatabaseSource | undefined;
+  },
+  create(d: Partial<DatabaseSource>): DatabaseSource {
+    const info = getDb()
+      .prepare(
+        `INSERT INTO databases
+          (name, engine, host, port, db_name, username, password_enc,
+           ssl_mode, included_schemas, is_supabase)
+         VALUES (@name, @engine, @host, @port, @db_name, @username,
+                 @password_enc, @ssl_mode, @included_schemas, @is_supabase)`,
+      )
+      .run({
+        name: d.name,
+        engine: d.engine ?? "postgres",
+        host: d.host,
+        port: d.port ?? 5432,
+        db_name: d.db_name,
+        username: d.username,
+        password_enc: d.password_enc,
+        ssl_mode: d.ssl_mode ?? "prefer",
+        included_schemas: d.included_schemas ?? "[]",
+        is_supabase: d.is_supabase ?? 0,
+      });
+    return this.get(Number(info.lastInsertRowid))!;
+  },
+  setPgMajor(id: number, major: number): void {
+    getDb()
+      .prepare(
+        "UPDATE databases SET pg_major = ?, updated_at = datetime('now') WHERE id = ?",
+      )
+      .run(major, id);
+  },
+  update(id: number, patch: Partial<DatabaseSource>): void {
+    const allowed = [
+      "name",
+      "host",
+      "port",
+      "db_name",
+      "username",
+      "password_enc",
+      "ssl_mode",
+      "included_schemas",
+      "is_supabase",
+    ] as const;
+    const keys = allowed.filter((k) => patch[k] !== undefined);
+    if (!keys.length) return;
+    const set = keys.map((k) => `${k} = @${k}`).join(", ");
+    const values: Record<string, unknown> = { id };
+    for (const k of keys) values[k] = patch[k];
+    getDb()
+      .prepare(
+        `UPDATE databases SET ${set}, updated_at = datetime('now') WHERE id = @id`,
+      )
+      .run(values);
+  },
+  remove(id: number): void {
+    getDb().prepare("DELETE FROM databases WHERE id = ?").run(id);
+  },
+};
+
+// --- Storages --------------------------------------------------------------
+export const storages = {
+  list(): Storage[] {
+    return getDb()
+      .prepare("SELECT * FROM storages ORDER BY name")
+      .all() as Storage[];
+  },
+  get(id: number): Storage | undefined {
+    return getDb()
+      .prepare("SELECT * FROM storages WHERE id = ?")
+      .get(id) as Storage | undefined;
+  },
+  create(s: Partial<Storage>): Storage {
+    const info = getDb()
+      .prepare(
+        "INSERT INTO storages (name, type, config_enc) VALUES (?, ?, ?)",
+      )
+      .run(s.name, s.type, s.config_enc ?? "");
+    return this.get(Number(info.lastInsertRowid))!;
+  },
+};
+
+// --- Backup policies -------------------------------------------------------
+export const policies = {
+  list(): BackupPolicy[] {
+    return getDb()
+      .prepare("SELECT * FROM backup_policies ORDER BY id")
+      .all() as BackupPolicy[];
+  },
+  get(id: number): BackupPolicy | undefined {
+    return getDb()
+      .prepare("SELECT * FROM backup_policies WHERE id = ?")
+      .get(id) as BackupPolicy | undefined;
+  },
+  create(p: Partial<BackupPolicy>): BackupPolicy {
+    const info = getDb()
+      .prepare(
+        `INSERT INTO backup_policies
+          (database_id, storage_id, schedule_cron, retention_count,
+           retention_days, compression, encrypt, verify_after, enabled)
+         VALUES (@database_id, @storage_id, @schedule_cron, @retention_count,
+                 @retention_days, @compression, @encrypt, @verify_after, @enabled)`,
+      )
+      .run({
+        database_id: p.database_id,
+        storage_id: p.storage_id,
+        schedule_cron: p.schedule_cron,
+        retention_count: p.retention_count ?? null,
+        retention_days: p.retention_days ?? null,
+        compression: p.compression ?? "zstd",
+        encrypt: p.encrypt ?? 1,
+        verify_after: p.verify_after ?? 1,
+        enabled: p.enabled ?? 1,
+      });
+    return this.get(Number(info.lastInsertRowid))!;
+  },
+  update(id: number, patch: Partial<BackupPolicy>): void {
+    const allowed = [
+      "storage_id",
+      "schedule_cron",
+      "retention_count",
+      "retention_days",
+      "compression",
+      "encrypt",
+      "verify_after",
+      "enabled",
+    ] as const;
+    const keys = allowed.filter((k) => patch[k] !== undefined);
+    if (!keys.length) return;
+    const set = keys.map((k) => `${k} = @${k}`).join(", ");
+    const values: Record<string, unknown> = { id };
+    for (const k of keys) values[k] = patch[k];
+    getDb()
+      .prepare(`UPDATE backup_policies SET ${set} WHERE id = @id`)
+      .run(values);
+  },
+  remove(id: number): void {
+    getDb().prepare("DELETE FROM backup_policies WHERE id = ?").run(id);
+  },
+};
+
+// --- Backups ---------------------------------------------------------------
+export const backups = {
+  list(databaseId?: number): Backup[] {
+    if (databaseId != null) {
+      return getDb()
+        .prepare(
+          "SELECT * FROM backups WHERE database_id = ? ORDER BY created_at DESC",
+        )
+        .all(databaseId) as Backup[];
+    }
+    return getDb()
+      .prepare("SELECT * FROM backups ORDER BY created_at DESC")
+      .all() as Backup[];
+  },
+  get(id: number): Backup | undefined {
+    return getDb()
+      .prepare("SELECT * FROM backups WHERE id = ?")
+      .get(id) as Backup | undefined;
+  },
+  create(databaseId: number, trigger: "manual" | "schedule"): Backup {
+    const info = getDb()
+      .prepare(
+        "INSERT INTO backups (database_id, status, trigger) VALUES (?, 'pending', ?)",
+      )
+      .run(databaseId, trigger);
+    return this.get(Number(info.lastInsertRowid))!;
+  },
+  update(id: number, patch: Partial<Backup>): void {
+    const keys = Object.keys(patch);
+    if (!keys.length) return;
+    const set = keys.map((k) => `${k} = @${k}`).join(", ");
+    getDb()
+      .prepare(`UPDATE backups SET ${set} WHERE id = @id`)
+      .run({ ...patch, id });
+  },
+  markStatus(id: number, status: BackupStatus): void {
+    this.update(id, { status });
+  },
+  /** Sauvegardes réussies d'une politique, de la plus récente à la plus ancienne. */
+  successfulByPolicy(policyId: number): Backup[] {
+    return getDb()
+      .prepare(
+        "SELECT * FROM backups WHERE policy_id = ? AND status = 'success' ORDER BY created_at DESC",
+      )
+      .all(policyId) as Backup[];
+  },
+  remove(id: number): void {
+    getDb().prepare("DELETE FROM backups WHERE id = ?").run(id);
+  },
+};
+
+// --- Verifications ---------------------------------------------------------
+export const verifications = {
+  list(filter?: { backupId?: number; databaseId?: number }): Verification[] {
+    if (filter?.backupId != null) {
+      return getDb()
+        .prepare(
+          "SELECT * FROM verifications WHERE backup_id = ? ORDER BY created_at DESC",
+        )
+        .all(filter.backupId) as Verification[];
+    }
+    if (filter?.databaseId != null) {
+      return getDb()
+        .prepare(
+          "SELECT * FROM verifications WHERE database_id = ? ORDER BY created_at DESC",
+        )
+        .all(filter.databaseId) as Verification[];
+    }
+    return getDb()
+      .prepare("SELECT * FROM verifications ORDER BY created_at DESC")
+      .all() as Verification[];
+  },
+  get(id: number): Verification | undefined {
+    return getDb()
+      .prepare("SELECT * FROM verifications WHERE id = ?")
+      .get(id) as Verification | undefined;
+  },
+  create(backupId: number, databaseId: number, trigger: string): Verification {
+    const info = getDb()
+      .prepare(
+        "INSERT INTO verifications (backup_id, database_id, status, trigger) VALUES (?, ?, 'pending', ?)",
+      )
+      .run(backupId, databaseId, trigger);
+    return this.get(Number(info.lastInsertRowid))!;
+  },
+  update(id: number, patch: Partial<Verification>): void {
+    const keys = Object.keys(patch);
+    if (!keys.length) return;
+    const set = keys.map((k) => `${k} = @${k}`).join(", ");
+    getDb()
+      .prepare(`UPDATE verifications SET ${set} WHERE id = @id`)
+      .run({ ...patch, id });
+  },
+  markStatus(id: number, status: VerificationStatus): void {
+    this.update(id, { status });
+  },
+};
+
+// --- Settings (clé/valeur) -------------------------------------------------
+export const settings = {
+  get(key: string): string | undefined {
+    const row = getDb()
+      .prepare("SELECT value FROM settings WHERE key = ?")
+      .get(key) as { value: string } | undefined;
+    return row?.value;
+  },
+  set(key: string, value: string): void {
+    getDb()
+      .prepare(
+        "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(key, value);
+  },
+};
+
+// --- Notification channels -------------------------------------------------
+export const channels = {
+  list(): NotificationChannel[] {
+    return getDb()
+      .prepare("SELECT * FROM notification_channels ORDER BY name")
+      .all() as NotificationChannel[];
+  },
+  listEnabled(): NotificationChannel[] {
+    return getDb()
+      .prepare("SELECT * FROM notification_channels WHERE enabled = 1")
+      .all() as NotificationChannel[];
+  },
+  get(id: number): NotificationChannel | undefined {
+    return getDb()
+      .prepare("SELECT * FROM notification_channels WHERE id = ?")
+      .get(id) as NotificationChannel | undefined;
+  },
+  create(c: Partial<NotificationChannel>): NotificationChannel {
+    const info = getDb()
+      .prepare(
+        `INSERT INTO notification_channels
+          (type, name, config_enc, on_start, on_success, on_failure, enabled)
+         VALUES (@type, @name, @config_enc, @on_start, @on_success, @on_failure, @enabled)`,
+      )
+      .run({
+        type: c.type,
+        name: c.name,
+        config_enc: c.config_enc ?? "",
+        on_start: c.on_start ?? 0,
+        on_success: c.on_success ?? 0,
+        on_failure: c.on_failure ?? 1,
+        enabled: c.enabled ?? 1,
+      });
+    return this.get(Number(info.lastInsertRowid))!;
+  },
+  update(id: number, patch: Partial<NotificationChannel>): void {
+    const allowed = [
+      "name",
+      "config_enc",
+      "on_start",
+      "on_success",
+      "on_failure",
+      "enabled",
+    ] as const;
+    const keys = allowed.filter((k) => patch[k] !== undefined);
+    if (!keys.length) return;
+    const set = keys.map((k) => `${k} = @${k}`).join(", ");
+    const values: Record<string, unknown> = { id };
+    for (const k of keys) values[k] = patch[k];
+    getDb()
+      .prepare(`UPDATE notification_channels SET ${set} WHERE id = @id`)
+      .run(values);
+  },
+  remove(id: number): void {
+    getDb().prepare("DELETE FROM notification_channels WHERE id = ?").run(id);
+  },
+};
