@@ -33,6 +33,42 @@ async function save() {
     toasts.error("Échec : " + (e as { message?: string }).message);
   }
 }
+
+// ---- export / import ----
+const fileInput = ref<HTMLInputElement | null>(null);
+const importing = ref(false);
+async function exportConfig() {
+  try {
+    const data = await api.get<unknown>("/api/settings/export");
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "dataspbackup-config.json";
+    a.click();
+    URL.revokeObjectURL(url);
+    toasts.success("Configuration exportée");
+  } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
+}
+function triggerImport() { fileInput.value?.click(); }
+async function onImport(ev: Event) {
+  const input = ev.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  importing.value = true;
+  try {
+    const json = JSON.parse(await file.text());
+    const res = await api.post<{ summary: Record<string, number> }>("/api/settings/import", json);
+    const s = res.summary;
+    toasts.success(`Importé : ${s.databases} base(s), ${s.storages} stockage(s), ${s.policies} planif(s), ${s.channels} canal(aux)`);
+    await load();
+  } catch (e) {
+    toasts.error("Import échoué : " + (e as { message?: string }).message);
+  } finally {
+    importing.value = false;
+    input.value = "";
+  }
+}
 onMounted(load);
 </script>
 
@@ -40,7 +76,24 @@ onMounted(load);
   <div class="page">
   <h1>Réglages</h1>
 
-  <div class="card" v-if="info" style="margin-top: 18px">
+  <div class="card" style="margin-top: 18px">
+    <h2>Export / import de configuration</h2>
+    <p class="muted">
+      Exporte les bases, stockages, planifications, canaux de notification et
+      réglages, <strong>sans les secrets</strong> (mots de passe, jetons).
+      Après un import, re-saisis les mots de passe des bases et les jetons des
+      canaux avant utilisation. Les entités dont le nom existe déjà sont ignorées.
+    </p>
+    <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+      <button class="btn" @click="exportConfig">Exporter la configuration</button>
+      <button class="btn secondary" :disabled="importing" @click="triggerImport">
+        {{ importing ? "Import…" : "Importer un fichier" }}
+      </button>
+      <input ref="fileInput" type="file" accept="application/json,.json" style="display:none" @change="onImport" />
+    </div>
+  </div>
+
+  <div class="card" v-if="info">
     <h2>Image de vérification par version PostgreSQL</h2>
     <p class="muted">
       Par défaut : <code>{{ info.default_template }}</code>
