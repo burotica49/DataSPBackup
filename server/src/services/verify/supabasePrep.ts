@@ -111,7 +111,7 @@ END $$;`,
   }
   for (const ext of extensions) {
     parts.push(
-      `CREATE EXTENSION IF NOT EXISTS "${ext.name}" WITH SCHEMA "${ext.schema}";`,
+      `CREATE EXTENSION IF NOT EXISTS "${ext.name}" WITH SCHEMA "${ext.schema}" CASCADE;`,
     );
   }
   // Si CREATE EXTENSION a échoué, le dump référence quand même le schéma.

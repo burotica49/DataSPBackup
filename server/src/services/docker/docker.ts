@@ -205,7 +205,13 @@ export async function startDisposablePostgres(opts: {
     Tty: false,
   };
   if (opts.postgresArgs?.length) {
-    createOpts.Cmd = ["postgres", ...opts.postgresArgs];
+    // Conserver la commande de l'image. supabase/postgres démarre avec
+    // `postgres -D /etc/postgresql`, là où pg_cron et pg_net sont préchargés.
+    const inspected = await d.getImage(opts.image).inspect();
+    const defaultCmd = inspected.Config?.Cmd?.length
+      ? inspected.Config.Cmd
+      : ["postgres"];
+    createOpts.Cmd = [...defaultCmd, ...opts.postgresArgs];
   }
   if (opts.platform) createOpts.platform = opts.platform;
   const container = await d.createContainer(createOpts);

@@ -33,7 +33,7 @@ describe("buildPrepPlan", () => {
       true,
     );
     const extAt = plan.sql.indexOf(
-      'CREATE EXTENSION IF NOT EXISTS "pg_cron" WITH SCHEMA "pg_catalog"',
+      'CREATE EXTENSION IF NOT EXISTS "pg_cron" WITH SCHEMA "pg_catalog" CASCADE',
     );
     const schemaAt = plan.sql.indexOf("CREATE SCHEMA IF NOT EXISTS cron;");
     expect(extAt).toBeGreaterThan(-1);
