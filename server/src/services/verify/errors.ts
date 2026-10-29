@@ -19,6 +19,14 @@ interface Rule {
 
 const RULES: Rule[] = [
   {
+    category: "role-membership",
+    test: /must be member of role "([^"]+)"/i,
+    hint: (m) =>
+      `Le rôle qui restaure doit être membre de « ${m[1]} » ` +
+      `(privilèges par défaut et GRANT … GRANTED BY de Supabase).`,
+    blocking: true,
+  },
+  {
     category: "role-missing",
     test: /role "([^"]+)" does not exist/i,
     hint: (m) =>

@@ -37,6 +37,15 @@ describe("parseRestoreErrors", () => {
     expect(r.categorized[0]?.blocking).toBe(false);
   });
 
+  it("signale qu'il faut être membre du rôle supabase_admin", () => {
+    const stderr =
+      'pg_restore: error: could not execute query: ERROR:  must be member of role "supabase_admin"';
+    const r = parseRestoreErrors(stderr);
+    expect(r.categorized[0]?.category).toBe("role-membership");
+    expect(r.categorized[0]?.blocking).toBe(true);
+    expect(r.rootError).toContain("supabase_admin");
+  });
+
   it("détecte le conflit PostGIS / DROP SCHEMA public", () => {
     const stderr =
       "pg_restore: error: ERROR:  cannot drop schema public because other objects depend on it";

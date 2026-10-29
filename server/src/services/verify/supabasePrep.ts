@@ -15,8 +15,27 @@ const SUPABASE_ROLES = [
   "supabase_auth_admin",
   "supabase_storage_admin",
   "supabase_functions_admin",
+  "supabase_realtime_admin",
+  "supabase_replication_admin",
+  "supabase_read_only_user",
+  "supabase_etl_admin",
   "dashboard_user",
   "pgbouncer",
+  "pgsodium_keyholder",
+  "pgsodium_keyiduser",
+  "pgsodium_keymaker",
+];
+
+/**
+ * Rôles cités par ALTER DEFAULT PRIVILEGES et par GRANT … GRANTED BY.
+ * Depuis PostgreSQL 15, même un superutilisateur doit en être membre.
+ */
+const MEMBERSHIP_ROLES = [
+  "supabase_admin",
+  "supabase_auth_admin",
+  "supabase_storage_admin",
+  "supabase_functions_admin",
+  "supabase_realtime_admin",
 ];
 
 /** Schéma par défaut pour une extension si sa localisation est inconnue. */
@@ -85,6 +104,14 @@ END $$;`,
     parts.push(
       `CREATE EXTENSION IF NOT EXISTS "${ext.name}" WITH SCHEMA "${ext.schema}";`,
     );
+  }
+  if (isSupabase) {
+    for (const role of MEMBERSHIP_ROLES) {
+      parts.push(`GRANT "${role}" TO postgres WITH ADMIN OPTION;`);
+      if (role !== "supabase_admin") {
+        parts.push(`GRANT "${role}" TO supabase_admin WITH ADMIN OPTION;`);
+      }
+    }
   }
 
   return {
