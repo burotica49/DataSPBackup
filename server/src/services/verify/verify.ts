@@ -51,7 +51,7 @@ async function psql(
   return execInContainer(container, [
     "bash",
     "-lc",
-    `PGPASSWORD=${session.password} psql ${host} -U ${session.user} -d ${db} -v ON_ERROR_STOP=0 -At <<'DATASP_EOSQL'\n${script}\nDATASP_EOSQL`,
+    `PGPASSWORD=${session.password} psql ${host} -U ${session.user} -d ${db} -w -v ON_ERROR_STOP=0 -At <<'DATASP_EOSQL'\n${script}\nDATASP_EOSQL`,
   ]);
 }
 
@@ -65,17 +65,11 @@ async function openLocalDb(
   password: string,
 ): Promise<LocalDb> {
   const probe = async (hostArgs: string[]): Promise<boolean> => {
+    const host = hostArgs.join(" ");
     const res = await execInContainer(container, [
-      "env",
-      `PGPASSWORD=${password}`,
-      "psql",
-      ...hostArgs,
-      "-U",
-      "supabase_admin",
-      "-d",
-      "postgres",
-      "-Atqc",
-      "SELECT 1",
+      "bash",
+      "-lc",
+      `PGPASSWORD=${password} psql ${host} -U supabase_admin -d postgres -w -Atc "SELECT 1"`,
     ]);
     return res.exitCode === 0 && res.stdout.trim() === "1";
   };

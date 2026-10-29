@@ -228,7 +228,39 @@ export async function execInContainer(
   stdout.on("data", (c) => (outBuf += c.toString()));
   stderr.on("data", (c) => (errBuf += c.toString()));
   container.modem.demuxStream(stream, stdout, stderr);
-  await new Promise<void>((resolve) => stream.on("end", () => resolve()));
+  // Le flux hijack de Docker n'émet pas toujours « end », surtout quand la
+  // commande n'écrit que sur stderr (psql qui refuse le rôle, par exemple).
+  // On s'appuie alors sur l'état de l'exec, en laissant un court délai pour
+  // que les derniers octets soient démultiplexés.
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let exitedAt: number | null = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearInterval(timer);
+      resolve();
+    };
+    const fail = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(timer);
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+    stream.on("end", finish);
+    stream.on("close", finish);
+    stream.on("error", fail);
+    const timer = setInterval(() => {
+      exec
+        .inspect()
+        .then((info) => {
+          if (info.Running) return;
+          if (exitedAt === null) exitedAt = Date.now();
+          if (Date.now() - exitedAt > 1000) finish();
+        })
+        .catch(fail);
+    }, 200);
+  });
   const info = await exec.inspect();
   return {
     exitCode: info.ExitCode ?? -1,
