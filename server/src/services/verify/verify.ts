@@ -21,6 +21,7 @@ import { inspectArchive, tocExcludingUserMappings } from "./archive.js";
 import { parseRestoreErrors } from "./errors.js";
 import { buildPrepPlan } from "./supabasePrep.js";
 import { introspectSource } from "./sourceIntrospect.js";
+import { rowCountDiffs } from "./rowCounts.js";
 
 const TARGET_DB = "verifydb";
 
@@ -340,9 +341,6 @@ async function compareWithSource(
   restoredRows: Record<string, number>,
   platform?: string,
 ): Promise<VerifyReport["comparison"]> {
-  // Tolérance : la source continue de vivre, on accepte un écart raisonnable.
-  const TOLERANCE_RATIO = 0.1;
-  const TOLERANCE_ABS = 100;
   const sourceRows: Record<string, number> = {};
   try {
     const pw = decryptString(source.password_enc);
@@ -367,17 +365,8 @@ EOSQL`,
     logger.warn({ err: String(err) }, "Comparaison source impossible");
   }
 
-  const diffs: VerifyReport["comparison"]["diffs"] = [];
-  let withinTolerance = true;
-  for (const [table, srcCount] of Object.entries(sourceRows)) {
-    const restored = restoredRows[table] ?? 0;
-    const allowed = Math.max(TOLERANCE_ABS, srcCount * TOLERANCE_RATIO);
-    if (restored < srcCount - allowed) {
-      withinTolerance = false;
-      diffs.push({ table, source: srcCount, restored });
-    }
-  }
+  const diffs = rowCountDiffs(sourceRows, restoredRows);
   // Si la source est injoignable, ne pas invalider sur la seule comparaison.
-  if (Object.keys(sourceRows).length === 0) withinTolerance = true;
+  const withinTolerance = Object.keys(sourceRows).length === 0 || diffs.length === 0;
   return { source: sourceRows, diffs, withinTolerance };
 }
