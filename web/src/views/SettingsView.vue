@@ -40,7 +40,7 @@ onMounted(load);
   <div class="page">
   <h1>Réglages</h1>
 
-  <div class="card" v-if="info">
+  <div class="card" v-if="info" style="margin-top: 18px">
     <h2>Image de vérification par version PostgreSQL</h2>
     <p class="muted">
       Par défaut : <code>{{ info.default_template }}</code>

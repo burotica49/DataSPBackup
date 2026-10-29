@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { api } from "../lib/api";
 
 interface CatError {
@@ -16,6 +16,7 @@ interface Verif {
 }
 
 const route = useRoute();
+const router = useRouter();
 const v = ref<Verif | null>(null);
 let timer: number | undefined;
 
@@ -31,6 +32,7 @@ onUnmounted(() => clearTimeout(timer));
 
 <template>
   <div class="page">
+  <button class="btn secondary" style="margin-bottom:16px" @click="router.back()">← Retour</button>
   <div v-if="v">
     <h1>
       Vérification #{{ v.id }}

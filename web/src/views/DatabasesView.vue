@@ -41,7 +41,9 @@ const policy = ref<Policy | null>(null);
 const selected = computed(() => dbs.value.find((d) => d.id === selectedId.value) ?? null);
 
 // ---- helpers ----
-function parse(d: string | null) { return d ? Date.parse(d + "Z") : NaN; }
+// created_at = "YYYY-MM-DD HH:MM:SS" (UTC, sans Z) → +Z ; started/finished = ISO (déjà Z)
+function parse(d: string | null) { if (!d) return NaN; return Date.parse(/[TZ]/.test(d) ? d : d + "Z"); }
+function fmtDate(d: string | null): string { const t = parse(d); return isNaN(t) ? "—" : new Date(t).toLocaleString(); }
 function fmtAgo(d: string | null): string {
   const t = parse(d); if (isNaN(t)) return "—";
   const s = Math.floor((Date.now() - t) / 1000);
@@ -66,6 +68,9 @@ function lastBackup(dbId: number): Backup | undefined {
 function verifFor(backupId: number): Verif | undefined {
   return verifs.value.find((v) => v.backup_id === backupId);
 }
+function statusLabel(s: string): string {
+  return s === "success" ? "Réussie" : s === "failed" ? "Échouée" : s === "running" ? "En cours" : s === "pending" ? "En attente" : s;
+}
 
 // ---- loading ----
 async function loadAll() {
@@ -87,7 +92,8 @@ async function loadDetail(id: number) {
   verifs.value = vs;
   policy.value = ps.find((p) => p.database_id === id) ?? null;
 }
-watch(selectedId, (id) => { if (id != null) { showAdd.value = false; editDb.value = false; loadDetail(id); } });
+function resetEdits() { editName.value = false; editParams.value = false; editVerif.value = false; editPolicy.value = false; }
+watch(selectedId, (id) => { if (id != null) { showAdd.value = false; resetEdits(); loadDetail(id); } });
 
 function select(id: number) { selectedId.value = id; tab.value = "config"; }
 
@@ -123,47 +129,90 @@ async function removeDb() {
   if (dbs.value[0]) selectedId.value = dbs.value[0].id;
 }
 
-// ---- add / edit database ----
+// ---- add database ----
 const showAdd = ref(false);
-const editDb = ref(false);
 const blank = () => ({
   name: "", host: "", port: 5432, db_name: "postgres", username: "postgres",
   password: "", ssl_mode: "prefer", is_supabase: true, included_schemas: "public,auth,storage",
 });
 const form = ref(blank());
-function openAdd() { showAdd.value = true; editDb.value = false; form.value = blank(); selectedId.value = null; }
-function openEdit() {
-  const d = selected.value; if (!d) return;
-  editDb.value = true;
-  form.value = {
-    name: d.name, host: d.host, port: d.port, db_name: d.db_name, username: d.username,
-    password: "", ssl_mode: d.ssl_mode, is_supabase: d.is_supabase === 1,
-    included_schemas: d.included_schemas.join(","),
-  };
-}
-async function saveDb() {
+function openAdd() { showAdd.value = true; resetEdits(); form.value = blank(); selectedId.value = null; }
+async function createDb() {
   const payload = {
     ...form.value, port: Number(form.value.port),
     included_schemas: form.value.included_schemas.split(",").map((s) => s.trim()).filter(Boolean),
   };
   try {
-    if (editDb.value && selected.value) {
-      const body: Record<string, unknown> = { ...payload };
-      if (!payload.password) delete body.password;
-      await api.patch(`/api/databases/${selected.value.id}`, body);
-      editDb.value = false;
-    } else {
-      const created = await api.post<Db>("/api/databases", payload);
-      showAdd.value = false;
-      await loadAll();
-      selectedId.value = created.id;
-    }
+    const created = await api.post<Db>("/api/databases", payload);
+    showAdd.value = false;
+    await loadAll();
+    selectedId.value = created.id;
     toasts.success("Base enregistrée");
+  } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
+}
+
+// ---- renommer (crayon du titre) ----
+const editName = ref(false);
+const nameEdit = ref("");
+function openRename() { if (!selected.value) return; nameEdit.value = selected.value.name; editName.value = true; }
+async function saveName() {
+  if (!selected.value || !nameEdit.value.trim()) return;
+  try {
+    await api.patch(`/api/databases/${selected.value.id}`, { name: nameEdit.value.trim() });
+    editName.value = false;
+    toasts.success("Base renommée");
     await loadAll();
   } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
 }
 
-// ---- backup config (policy) ----
+// ---- édition des paramètres de connexion ----
+const editParams = ref(false);
+const paramsForm = ref({ host: "", port: 5432, db_name: "", username: "", password: "", ssl_mode: "prefer", included_schemas: "" });
+function openParams() {
+  const d = selected.value; if (!d) return;
+  paramsForm.value = {
+    host: d.host, port: d.port, db_name: d.db_name, username: d.username,
+    password: "", ssl_mode: d.ssl_mode, included_schemas: d.included_schemas.join(","),
+  };
+  editParams.value = true;
+}
+async function saveParams() {
+  if (!selected.value) return;
+  const body: Record<string, unknown> = {
+    host: paramsForm.value.host, port: Number(paramsForm.value.port), db_name: paramsForm.value.db_name,
+    username: paramsForm.value.username, ssl_mode: paramsForm.value.ssl_mode,
+    included_schemas: paramsForm.value.included_schemas.split(",").map((s) => s.trim()).filter(Boolean),
+  };
+  if (paramsForm.value.password) body.password = paramsForm.value.password;
+  try {
+    await api.patch(`/api/databases/${selected.value.id}`, body);
+    editParams.value = false;
+    toasts.success("Paramètres enregistrés");
+    await loadAll();
+  } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
+}
+
+// ---- édition de la vérification de restauration ----
+const editVerif = ref(false);
+const verifForm = ref({ is_supabase: true, verify_after: true });
+function openVerif() {
+  const d = selected.value; if (!d) return;
+  verifForm.value = { is_supabase: d.is_supabase === 1, verify_after: policy.value ? policy.value.verify_after === 1 : true };
+  editVerif.value = true;
+}
+async function saveVerif() {
+  if (!selected.value) return;
+  try {
+    await api.patch(`/api/databases/${selected.value.id}`, { is_supabase: verifForm.value.is_supabase });
+    if (policy.value) await api.patch(`/api/policies/${policy.value.id}`, { verify_after: verifForm.value.verify_after });
+    editVerif.value = false;
+    toasts.success("Vérification enregistrée");
+    await loadAll();
+    await loadDetail(selected.value.id);
+  } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
+}
+
+// ---- configuration des sauvegardes (policy) ----
 const editPolicy = ref(false);
 const pform = ref({ schedule_cron: "0 2 * * *", retention_count: 7 as number | null, retention_days: null as number | null, encrypt: true, verify_after: true, enabled: true });
 function openPolicy() {
@@ -240,7 +289,7 @@ onMounted(loadAll);
             <div style="flex:2"><label>Schémas inclus (virgules ; vide = tous)</label><input v-model="form.included_schemas" /></div>
           </div>
           <label style="display:flex;align-items:center;gap:8px;margin-top:12px"><input type="checkbox" v-model="form.is_supabase" style="width:auto" /> Base Supabase (préparer rôles + extensions)</label>
-          <div style="margin-top:14px"><button class="btn" @click="saveDb">Créer</button><button class="btn secondary" style="margin-left:8px" @click="showAdd=false">Annuler</button></div>
+          <div style="margin-top:14px"><button class="btn" @click="createDb">Créer</button><button class="btn secondary" style="margin-left:8px" @click="showAdd=false">Annuler</button></div>
         </div>
       </div>
 
@@ -248,10 +297,17 @@ onMounted(loadAll);
 
       <template v-else>
         <h1 style="display:flex;align-items:center;gap:10px">
-          {{ selected.name }}
-          <button class="icon-btn" title="Modifier" @click="openEdit">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
-          </button>
+          <template v-if="editName">
+            <input v-model="nameEdit" style="max-width:340px;font-size:20px;font-weight:700" @keyup.enter="saveName" />
+            <button class="btn" @click="saveName">Enregistrer</button>
+            <button class="btn secondary" @click="editName=false">Annuler</button>
+          </template>
+          <template v-else>
+            {{ selected.name }}
+            <button class="icon-btn" title="Renommer" @click="openRename">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+            </button>
+          </template>
         </h1>
 
         <div class="tabs">
@@ -260,43 +316,47 @@ onMounted(loadAll);
           <div class="tab" :class="{ active: tab==='verifs' }" @click="tab='verifs'">Vérifications</div>
         </div>
 
+        <div class="card">
         <!-- ===== Configuration ===== -->
         <div v-if="tab==='config'">
-          <!-- édition base -->
-          <div v-if="editDb" class="card" style="max-width:720px">
-            <h2>Modifier la connexion</h2>
-            <div class="row">
-              <div><label>Nom</label><input v-model="form.name" /></div>
-              <div><label>Hôte</label><input v-model="form.host" /></div>
-              <div style="max-width:110px"><label>Port</label><input v-model="form.port" type="number" /></div>
-            </div>
-            <div class="row">
-              <div><label>Base</label><input v-model="form.db_name" /></div>
-              <div><label>Utilisateur</label><input v-model="form.username" /></div>
-              <div><label>Mot de passe <span class="muted">(vide = inchangé)</span></label><input v-model="form.password" type="password" /></div>
-            </div>
-            <div class="row">
-              <div style="max-width:160px"><label>Mode SSL</label><select v-model="form.ssl_mode"><option>disable</option><option>prefer</option><option>require</option></select></div>
-              <div style="flex:2"><label>Schémas inclus</label><input v-model="form.included_schemas" /></div>
-            </div>
-            <label style="display:flex;align-items:center;gap:8px;margin-top:12px"><input type="checkbox" v-model="form.is_supabase" style="width:auto" /> Base Supabase</label>
-            <div style="margin-top:14px"><button class="btn" @click="saveDb">Enregistrer</button><button class="btn secondary" style="margin-left:8px" @click="editDb=false">Annuler</button></div>
-          </div>
-
-          <div v-else class="config-grid">
+          <div class="config-grid">
+            <!-- Paramètres de la base de données -->
             <div class="config-section">
-              <h3>Paramètres de la base de données</h3>
-              <div class="field"><span class="k">Version de PG</span><span class="v">{{ selected.pg_major ?? "—" }}</span></div>
-              <div class="field"><span class="k">Hôte</span><span class="v">{{ selected.host }}</span></div>
-              <div class="field"><span class="k">Port</span><span class="v">{{ selected.port }}</span></div>
-              <div class="field"><span class="k">Nom d'utilisateur</span><span class="v">{{ selected.username }}</span></div>
-              <div class="field"><span class="k">Mot de passe</span><span class="v">••••••••••••</span></div>
-              <div class="field"><span class="k">Nom de la base</span><span class="v">{{ selected.db_name }}</span></div>
-              <div class="field"><span class="k">Mode SSL</span><span class="v">{{ selected.ssl_mode }}</span></div>
-              <div class="field"><span class="k">Schémas inclus</span><span class="v">{{ selected.included_schemas.join(", ") || "toutes" }}</span></div>
-              <div class="field"><span class="k">Type</span><span class="v">{{ selected.is_supabase ? "Supabase" : "PostgreSQL" }}</span></div>
+              <h3>Paramètres de la base de données
+                <button class="icon-btn" style="width:26px;height:26px" title="Modifier" @click="openParams">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                </button>
+              </h3>
+              <template v-if="editParams">
+                <div class="row">
+                  <div><label>Hôte</label><input v-model="paramsForm.host" /></div>
+                  <div style="max-width:110px"><label>Port</label><input v-model="paramsForm.port" type="number" /></div>
+                </div>
+                <div class="row">
+                  <div><label>Base</label><input v-model="paramsForm.db_name" /></div>
+                  <div><label>Utilisateur</label><input v-model="paramsForm.username" /></div>
+                </div>
+                <div class="row">
+                  <div><label>Mot de passe <span class="muted">(vide = inchangé)</span></label><input v-model="paramsForm.password" type="password" /></div>
+                  <div style="max-width:160px"><label>Mode SSL</label><select v-model="paramsForm.ssl_mode"><option>disable</option><option>prefer</option><option>require</option></select></div>
+                </div>
+                <label>Schémas inclus (virgules ; vide = tous)</label><input v-model="paramsForm.included_schemas" />
+                <div style="margin-top:12px"><button class="btn" @click="saveParams">Enregistrer</button><button class="btn secondary" style="margin-left:8px" @click="editParams=false">Annuler</button></div>
+              </template>
+              <template v-else>
+                <div class="field"><span class="k">Version de PG</span><span class="v">{{ selected.pg_major ?? "—" }}</span></div>
+                <div class="field"><span class="k">Hôte</span><span class="v">{{ selected.host }}</span></div>
+                <div class="field"><span class="k">Port</span><span class="v">{{ selected.port }}</span></div>
+                <div class="field"><span class="k">Nom d'utilisateur</span><span class="v">{{ selected.username }}</span></div>
+                <div class="field"><span class="k">Mot de passe</span><span class="v">••••••••••••</span></div>
+                <div class="field"><span class="k">Nom de la base</span><span class="v">{{ selected.db_name }}</span></div>
+                <div class="field"><span class="k">Mode SSL</span><span class="v">{{ selected.ssl_mode }}</span></div>
+                <div class="field"><span class="k">Schémas inclus</span><span class="v">{{ selected.included_schemas.join(", ") || "toutes" }}</span></div>
+                <div class="field"><span class="k">Type</span><span class="v">{{ selected.is_supabase ? "Supabase" : "PostgreSQL" }}</span></div>
+              </template>
             </div>
 
+            <!-- Configuration des sauvegardes -->
             <div class="config-section">
               <h3>Configuration des sauvegardes
                 <button class="icon-btn" style="width:26px;height:26px" title="Modifier" @click="openPolicy">
@@ -330,15 +390,32 @@ onMounted(loadAll);
               </template>
             </div>
 
+            <!-- Vérification de restauration -->
             <div class="config-section">
-              <h3>Vérification de restauration</h3>
-              <div class="field"><span class="k">Préparée Supabase</span><span class="v">{{ selected.is_supabase ? "Oui (rôles + extensions)" : "Standard" }}</span></div>
-              <div class="field"><span class="k">Déclenchement</span><span class="v">{{ policy?.verify_after ? "Après chaque sauvegarde" : "Manuel" }}</span></div>
-              <div class="field"><span class="k">Cible</span><span class="v">Conteneur jetable (détruit ensuite)</span></div>
+              <h3>Vérification de restauration
+                <button class="icon-btn" style="width:26px;height:26px" title="Modifier" @click="openVerif">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                </button>
+              </h3>
+              <template v-if="editVerif">
+                <label style="display:flex;gap:8px;align-items:center;margin-top:6px"><input type="checkbox" v-model="verifForm.is_supabase" style="width:auto" /> Préparée Supabase (rôles + extensions)</label>
+                <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" v-model="verifForm.verify_after" style="width:auto" :disabled="!policy" /> Vérifier après chaque sauvegarde <span v-if="!policy" class="muted">(nécessite une planification)</span></label>
+                <div style="margin-top:12px"><button class="btn" @click="saveVerif">Enregistrer</button><button class="btn secondary" style="margin-left:8px" @click="editVerif=false">Annuler</button></div>
+              </template>
+              <template v-else>
+                <div class="field"><span class="k">Préparée Supabase</span><span class="v">{{ selected.is_supabase ? "Oui (rôles + extensions)" : "Standard" }}</span></div>
+                <div class="field"><span class="k">Déclenchement</span><span class="v">{{ policy?.verify_after ? "Après chaque sauvegarde" : "Manuel" }}</span></div>
+                <div class="field"><span class="k">Cible</span><span class="v">Conteneur jetable (détruit ensuite)</span></div>
+              </template>
             </div>
 
+            <!-- Canaux de notification -->
             <div class="config-section">
-              <h3>Canaux de notification</h3>
+              <h3>Canaux de notification
+                <RouterLink class="icon-btn" style="width:26px;height:26px" to="/notifications" title="Gérer">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                </RouterLink>
+              </h3>
               <div v-if="channels.length" class="field">
                 <span class="k">Notifier via</span>
                 <span class="v">{{ channels.map(c => c.name + " (" + c.type + ")").join(", ") }}</span>
@@ -362,13 +439,16 @@ onMounted(loadAll);
             <button class="btn" @click="runBackup">Lancer une sauvegarde maintenant</button>
             <button class="btn secondary" @click="loadDetail(selected.id)">Rafraîchir</button>
           </div>
-          <div class="card" style="padding:0">
+          <div class="table-wrap">
             <table>
               <thead><tr><th>Créée le</th><th>Statut</th><th>Taille</th><th>Durée</th><th>Vérification</th><th>Actions</th></tr></thead>
               <tbody>
                 <tr v-for="b in backups" :key="b.id">
-                  <td>{{ new Date(b.created_at + "Z").toLocaleString() }}<div class="muted">{{ fmtAgo(b.created_at) }}</div></td>
-                  <td><span class="badge" :class="b.status">{{ b.status === 'success' ? 'Réussie' : b.status }}</span><div v-if="b.error" class="muted">{{ b.error }}</div></td>
+                  <td>{{ fmtDate(b.created_at) }}<div class="muted">{{ fmtAgo(b.created_at) }}</div></td>
+                  <td>
+                    <RouterLink :to="`/backups/${b.id}`" title="Voir le détail"><span class="badge" :class="b.status">{{ statusLabel(b.status) }}</span></RouterLink>
+                    <div v-if="b.error" class="muted">{{ b.error }}</div>
+                  </td>
                   <td>{{ fmtSize(b.size_bytes) }}</td>
                   <td>{{ fmtDuration(b.started_at, b.finished_at) }}</td>
                   <td>
@@ -379,6 +459,9 @@ onMounted(loadAll);
                     <button v-if="b.status==='success'" class="icon-btn" title="Vérifier" @click="verify(b.id)">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" /><path d="m9 12 2 2 4-4" /></svg>
                     </button>
+                    <RouterLink class="icon-btn" style="margin-left:6px" :to="`/backups/${b.id}`" title="Détail">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z" /><circle cx="12" cy="12" r="3" /></svg>
+                    </RouterLink>
                   </td>
                 </tr>
                 <tr v-if="!backups.length"><td colspan="6" class="muted">Aucune sauvegarde.</td></tr>
@@ -390,12 +473,12 @@ onMounted(loadAll);
         <!-- ===== Vérifications ===== -->
         <div v-else>
           <p class="muted" style="margin-bottom:14px">Chaque ligne correspond à une restauration de cette base dans une copie temporaire.</p>
-          <div class="card" style="padding:0">
+          <div class="table-wrap">
             <table>
               <thead><tr><th>Créée le</th><th>Statut</th><th>Déclenchement</th><th>Durée</th><th>Actions</th></tr></thead>
               <tbody>
                 <tr v-for="v in verifs" :key="v.id">
-                  <td>{{ new Date(v.created_at + "Z").toLocaleString() }}<div class="muted">{{ fmtAgo(v.created_at) }}</div></td>
+                  <td>{{ fmtDate(v.created_at) }}<div class="muted">{{ fmtAgo(v.created_at) }}</div></td>
                   <td><span class="badge" :class="v.status">{{ v.status === 'success' ? 'Réussie' : v.status === 'failed' ? 'Échouée' : v.status }}</span></td>
                   <td class="muted">{{ v.trigger }}</td>
                   <td>{{ fmtDuration(v.started_at, v.finished_at) }}</td>
@@ -409,6 +492,7 @@ onMounted(loadAll);
               </tbody>
             </table>
           </div>
+        </div>
         </div>
       </template>
     </section>

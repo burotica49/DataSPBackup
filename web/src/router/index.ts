@@ -31,6 +31,11 @@ const router = createRouter({
       component: () => import("../views/SettingsView.vue"),
     },
     {
+      path: "/backups/:id",
+      name: "backup",
+      component: () => import("../views/BackupDetailView.vue"),
+    },
+    {
       path: "/verifications/:id",
       name: "verification",
       component: () => import("../views/VerificationView.vue"),
