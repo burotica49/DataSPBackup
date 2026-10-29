@@ -47,6 +47,7 @@ interface Db {
   excluded_tables: string[];
   excluded_table_data: string[];
   ignore_user_mappings: number;
+  has_password: boolean;
 }
 interface Backup {
   id: number; database_id: number; status: string; trigger: string;
@@ -565,7 +566,8 @@ onUnmounted(() => {
       <div v-for="d in dbs" :key="d.id" class="db-card" :class="{ active: d.id === selectedId }" @click="select(d.id)">
         <div class="db-name">
           {{ d.name }}
-          <span v-if="d.pg_major" class="badge available">Disponible</span>
+          <span v-if="!d.has_password" class="badge warn">Mot de passe requis</span>
+          <span v-else-if="d.pg_major" class="badge available">Disponible</span>
           <span v-else class="badge neutral">Non testé</span>
         </div>
         <div class="db-meta">
@@ -647,6 +649,10 @@ onUnmounted(() => {
         <div class="card">
         <!-- ===== Configuration ===== -->
         <div v-if="tab==='config'">
+          <div v-if="!selected.has_password" style="background:var(--warn-soft);border:1px solid var(--warn);color:var(--warn);border-radius:10px;padding:10px 12px;margin-bottom:16px">
+            Mot de passe non défini (base importée sans secret). Clique sur le crayon
+            de « Paramètres de la base de données » pour le renseigner avant de tester ou sauvegarder.
+          </div>
           <div class="config-grid">
             <!-- Paramètres de la base de données -->
             <div class="config-section">

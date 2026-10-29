@@ -26,9 +26,15 @@ function containerPath(rel: string): string {
 
 /** Détecte la version majeure du serveur source via un conteneur client. */
 export async function detectPgMajor(source: DatabaseSource): Promise<number> {
+  const pw = decryptString(source.password_enc);
+  if (!pw) {
+    throw new Error(
+      "Mot de passe non défini pour cette base (import sans secret ?). " +
+        "Renseignez-le via « Modifier » avant de tester ou sauvegarder.",
+    );
+  }
   const image = resolveImage(config.docker.verifyImageFallback, 17);
   await pullImage(image);
-  const pw = decryptString(source.password_enc);
   const res = await runEphemeral({
     image,
     entrypoint: "",
@@ -80,6 +86,12 @@ export async function runBackup(
   const finalRel = encrypt ? `${plainRel}.enc` : plainRel;
 
   try {
+    if (!decryptString(source.password_enc)) {
+      throw new Error(
+        "Mot de passe non défini pour cette base (import sans secret ?). " +
+          "Renseignez-le via « Modifier » avant de sauvegarder.",
+      );
+    }
     const major = source.pg_major ?? (await detectPgMajor(source));
     if (!source.pg_major) databases.setPgMajor(source.id, major);
 

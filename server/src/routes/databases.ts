@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { databases } from "../models/repo.js";
-import { encryptString } from "../services/crypto/crypto.js";
+import { decryptString, encryptString } from "../services/crypto/crypto.js";
 import { detectPgMajor } from "../services/backup/backup.js";
 import { requireAuth } from "../lib/auth.js";
 
@@ -66,11 +66,19 @@ function parseList(raw: string | null | undefined): string[] {
 }
 
 /** Ne jamais renvoyer le mot de passe chiffré au client. */
+function hasPassword(enc: string): boolean {
+  try {
+    return decryptString(enc).length > 0;
+  } catch {
+    return true; // secret illisible ici : on ne prétend pas qu'il manque
+  }
+}
+
 function publicView(d: ReturnType<typeof databases.get> & object) {
   const { password_enc, ...rest } = d;
-  void password_enc;
   return {
     ...rest,
+    has_password: hasPassword(password_enc),
     included_schemas: parseList(d.included_schemas),
     excluded_tables: parseList(d.excluded_tables),
     excluded_table_data: parseList(d.excluded_table_data),
