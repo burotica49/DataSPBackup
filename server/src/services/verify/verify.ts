@@ -32,40 +32,57 @@ function paths(relPath: string): { host: string; container: string } {
   };
 }
 
+/** Session locale dans la cible jetable. Le mot de passe est hexadécimal. */
+interface LocalDb {
+  user: string;
+  password: string;
+  /** Arguments psql/pg_restore : vide (socket) ou `-h 127.0.0.1`. */
+  hostArgs: string[];
+}
+
 /** Exécute un script SQL (multi-instructions / méta-commandes) via psql. */
 async function psql(
   container: Parameters<typeof execInContainer>[0],
   db: string,
   script: string,
-  user = "postgres",
+  session: LocalDb,
 ) {
+  const host = session.hostArgs.join(" ");
   return execInContainer(container, [
     "bash",
     "-lc",
-    `psql -U ${user} -d ${db} -v ON_ERROR_STOP=0 -At <<'DATASP_EOSQL'\n${script}\nDATASP_EOSQL`,
+    `PGPASSWORD=${session.password} psql ${host} -U ${session.user} -d ${db} -v ON_ERROR_STOP=0 -At <<'DATASP_EOSQL'\n${script}\nDATASP_EOSQL`,
   ]);
 }
 
 /**
- * Sur l'image supabase/postgres le superutilisateur est supabase_admin.
- * S'il accepte une connexion locale, on restaure avec lui : il est déjà
- * membre de son propre rôle, ce que PostgreSQL 15 exige pour rejouer
- * les privilèges Supabase.
+ * Sur l'image supabase/postgres, supabase_admin est le superutilisateur
+ * et le socket local exige son mot de passe (scram). Le rôle postgres est
+ * rétrogradé : il ne peut ni créer les rôles réservés, ni en devenir membre.
  */
-async function localRestoreUser(
+async function openLocalDb(
   container: Parameters<typeof execInContainer>[0],
-): Promise<string> {
-  const res = await execInContainer(container, [
-    "psql",
-    "-U",
-    "supabase_admin",
-    "-d",
-    "postgres",
-    "-Atqc",
-    "SELECT 1",
-  ]);
-  if (res.exitCode === 0 && res.stdout.trim() === "1") return "supabase_admin";
-  return "postgres";
+  password: string,
+): Promise<LocalDb> {
+  const probe = async (hostArgs: string[]): Promise<boolean> => {
+    const res = await execInContainer(container, [
+      "env",
+      `PGPASSWORD=${password}`,
+      "psql",
+      ...hostArgs,
+      "-U",
+      "supabase_admin",
+      "-d",
+      "postgres",
+      "-Atqc",
+      "SELECT 1",
+    ]);
+    return res.exitCode === 0 && res.stdout.trim() === "1";
+  };
+  if (await probe([])) return { user: "supabase_admin", password, hostArgs: [] };
+  const tcp = ["-h", "127.0.0.1"];
+  if (await probe(tcp)) return { user: "supabase_admin", password, hostArgs: tcp };
+  return { user: "postgres", password, hostArgs: [] };
 }
 
 export interface VerifyReport {
@@ -73,6 +90,7 @@ export interface VerifyReport {
   bundledImage: boolean;
   platform?: string;
   pgMajor: number;
+  dbUser: string;
   prep: { roles: string[]; schemas: string[]; extensions: string[] };
   archiveSchemas: string[];
   archiveExtensions: string[];
@@ -161,21 +179,28 @@ export async function runVerification(verificationId: number): Promise<void> {
       platform,
     });
     await waitForPostgres(container);
-    const dbUser = await localRestoreUser(container);
-    mark(`cible jetable démarrée (${dbUser})`);
+    const session = await openLocalDb(container, superPw);
+    mark(`cible jetable démarrée (${session.user})`);
 
     // 5. Base cible VIDE (pas de --clean, pas de DROP SCHEMA public).
     await psql(
       container,
       "postgres",
       `DROP DATABASE IF EXISTS ${TARGET_DB};\nCREATE DATABASE ${TARGET_DB};`,
-      dbUser,
+      session,
     );
 
     // 6. Préparer rôles / schéma extensions / extensions AVANT restauration.
     const prep = buildPrepPlan(sourceIntro, inspection, source.is_supabase === 1);
     if (prep.sql.trim()) {
-      await psql(container, TARGET_DB, prep.sql, dbUser);
+      const prepRes = await psql(container, TARGET_DB, prep.sql, session);
+      if (/ERROR/i.test(prepRes.stderr)) {
+        logger.warn(
+          { stderr: prepRes.stderr.slice(-500) },
+          "Préparation SQL avec erreurs",
+        );
+        mark("préparation SQL : certaines commandes ont échoué");
+      }
     }
     mark(
       `cible préparée: ${prep.roles.length} rôles, ` +
@@ -194,9 +219,12 @@ export async function runVerification(verificationId: number): Promise<void> {
       mark("correspondances d'utilisateurs ignorées");
     }
     const restore = await execInContainer(container, [
+      "env",
+      `PGPASSWORD=${session.password}`,
       "pg_restore",
+      ...session.hostArgs,
       "-U",
-      dbUser,
+      session.user,
       "-d",
       TARGET_DB,
       "--no-password",
@@ -209,7 +237,7 @@ export async function runVerification(verificationId: number): Promise<void> {
     const parsed = parseRestoreErrors(restore.stderr);
 
     // 8. Comptages dans la cible restaurée.
-    const counts = await countRestored(container, dbUser);
+    const counts = await countRestored(container, session);
 
     // 9. Comparaison avec la source (vivante → tolérance).
     const comparison = await compareWithSource(image, source, counts.rows, platform);
@@ -219,6 +247,7 @@ export async function runVerification(verificationId: number): Promise<void> {
       bundledImage: bundled,
       platform,
       pgMajor: major,
+      dbUser: session.user,
       prep: {
         roles: prep.roles,
         schemas: prep.schemas,
@@ -279,7 +308,7 @@ interface RestoredCounts {
 
 async function countRestored(
   container: Parameters<typeof execInContainer>[0],
-  user = "postgres",
+  session: LocalDb,
 ): Promise<RestoredCounts> {
   // Compte exact par table via génération dynamique (\gexec).
   const res = await psql(
@@ -288,7 +317,7 @@ async function countRestored(
     `SELECT 'SELECT '''||schemaname||'.'||tablename||''' AS t, count(*) AS c FROM '||quote_ident(schemaname)||'.'||quote_ident(tablename)
      FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')
      ORDER BY 1 \\gexec`,
-    user,
+    session,
   );
   const rows: Record<string, number> = {};
   for (const line of res.stdout.split("\n")) {
@@ -300,7 +329,7 @@ async function countRestored(
     container,
     TARGET_DB,
     `SELECT pg_database_size('${TARGET_DB}')`,
-    user,
+    session,
   );
   const sizeBytes = Number((size.stdout.match(/\d+/) ?? ["0"])[0]) || null;
   return { schemas, tables: Object.keys(rows).length, rows, sizeBytes };

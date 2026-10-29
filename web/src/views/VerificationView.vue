@@ -54,6 +54,7 @@ onUnmounted(() => clearTimeout(timer));
       <p class="muted">Image : <code>{{ v.report.image }}</code>
         <span v-if="v.report.bundledImage === false" class="badge warn" style="margin-left:8px">repli postgres standard</span>
       </p>
+      <p v-if="v.report.dbUser" class="muted">Rôle de restauration : <code>{{ v.report.dbUser }}</code></p>
       <p v-if="v.report.prep">
         Préparé : {{ v.report.prep.roles?.length }} rôles,
         {{ v.report.prep.extensions?.length }} extensions
