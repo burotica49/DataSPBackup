@@ -26,6 +26,21 @@ describe("buildPrepPlan", () => {
     );
   });
 
+  it("installe pg_cron dans pg_catalog puis assure le schéma cron", () => {
+    const plan = buildPrepPlan(
+      { roles: [], extensions: [{ name: "pg_cron", schema: "cron" }] },
+      archive,
+      true,
+    );
+    const extAt = plan.sql.indexOf(
+      'CREATE EXTENSION IF NOT EXISTS "pg_cron" WITH SCHEMA "pg_catalog"',
+    );
+    const schemaAt = plan.sql.indexOf("CREATE SCHEMA IF NOT EXISTS cron;");
+    expect(extAt).toBeGreaterThan(-1);
+    expect(schemaAt).toBeGreaterThan(extAt);
+    expect(plan.sql).not.toContain('WITH SCHEMA "cron"');
+  });
+
   it("n'ajoute pas les rôles Supabase hors base Supabase", () => {
     const plan = buildPrepPlan(source, archive, false);
     expect(plan.roles).not.toContain("supabase_realtime_admin");

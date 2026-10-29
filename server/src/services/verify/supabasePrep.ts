@@ -81,10 +81,19 @@ export function buildPrepPlan(
       schema: EXTENSION_SCHEMA_FALLBACK[name] ?? "extensions",
     }));
   }
+  // pg_cron des images Supabase n'est pas déplaçable : il s'installe dans
+  // pg_catalog et crée lui-même le schéma cron. WITH SCHEMA cron échoue.
+  extensions = extensions.map((e) =>
+    e.name === "pg_cron" ? { name: e.name, schema: "pg_catalog" } : e,
+  );
+  const hasPgCron = extensions.some((e) => e.name === "pg_cron");
 
-  // --- Schémas hôtes des extensions (public existe déjà) -------------------
+  // --- Schémas hôtes des extensions (public et pg_catalog existent déjà) --
   const schemaSet = new Set<string>();
-  for (const e of extensions) if (e.schema !== "public") schemaSet.add(e.schema);
+  for (const e of extensions) {
+    if (e.schema === "public" || e.schema === "pg_catalog") continue;
+    schemaSet.add(e.schema);
+  }
 
   // --- SQL (idempotent) ----------------------------------------------------
   const parts: string[] = [];
@@ -105,6 +114,8 @@ END $$;`,
       `CREATE EXTENSION IF NOT EXISTS "${ext.name}" WITH SCHEMA "${ext.schema}";`,
     );
   }
+  // Si CREATE EXTENSION a échoué, le dump référence quand même le schéma.
+  if (hasPgCron) parts.push(`CREATE SCHEMA IF NOT EXISTS cron;`);
   if (isSupabase) {
     for (const role of MEMBERSHIP_ROLES) {
       parts.push(`GRANT "${role}" TO postgres WITH ADMIN OPTION;`);

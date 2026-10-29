@@ -187,6 +187,8 @@ export async function startDisposablePostgres(opts: {
   superuserPassword: string;
   binds?: Array<{ volume: string; target: string; readOnly?: boolean }>;
   platform?: string;
+  /** Arguments ajoutés à postgres, ex: ["-c", "cron.database_name=verifydb"]. */
+  postgresArgs?: string[];
 }): Promise<Docker.Container> {
   const d = getDocker();
   const binds = (opts.binds ?? []).map(
@@ -202,6 +204,9 @@ export async function startDisposablePostgres(opts: {
     HostConfig: { Binds: binds, AutoRemove: false },
     Tty: false,
   };
+  if (opts.postgresArgs?.length) {
+    createOpts.Cmd = ["postgres", ...opts.postgresArgs];
+  }
   if (opts.platform) createOpts.platform = opts.platform;
   const container = await d.createContainer(createOpts);
   await container.start();

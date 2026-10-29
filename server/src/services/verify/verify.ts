@@ -171,6 +171,11 @@ export async function runVerification(verificationId: number): Promise<void> {
       superuserPassword: superPw,
       binds: [dataMount(true)],
       platform,
+      // pg_cron refuse de s'installer ailleurs que dans cron.database_name,
+      // qui vaut « postgres » par défaut. La restauration vise verifydb.
+      postgresArgs: image.includes("supabase/postgres")
+        ? ["-c", `cron.database_name=${TARGET_DB}`]
+        : undefined,
     });
     await waitForPostgres(container);
     const session = await openLocalDb(container, superPw);
