@@ -179,7 +179,7 @@ function sameGroupName(a: string, b: string): boolean {
 export const groups = {
   list(): DbGroup[] {
     return getDb()
-      .prepare("SELECT * FROM db_groups ORDER BY name")
+      .prepare("SELECT * FROM db_groups ORDER BY position, name")
       .all() as DbGroup[];
   },
   get(id: number): DbGroup | undefined {
@@ -193,10 +193,26 @@ export const groups = {
     );
   },
   create(name: string): DbGroup {
+    const next = getDb()
+      .prepare("SELECT COALESCE(MAX(position), -1) + 1 AS p FROM db_groups")
+      .get() as { p: number };
     const info = getDb()
-      .prepare("INSERT INTO db_groups (name) VALUES (?)")
-      .run(name);
+      .prepare("INSERT INTO db_groups (name, position) VALUES (?, ?)")
+      .run(name, next.p);
     return this.get(Number(info.lastInsertRowid))!;
+  },
+  /** Réécrit l'ordre. `ids` doit contenir chaque groupe une seule fois. */
+  reorder(ids: number[]): boolean {
+    const existing = this.list().map((g) => g.id);
+    if (ids.length !== existing.length || new Set(ids).size !== ids.length) return false;
+    const known = new Set(existing);
+    if (!ids.every((id) => known.has(id))) return false;
+    const tx = getDb().transaction(() => {
+      const stmt = getDb().prepare("UPDATE db_groups SET position = ? WHERE id = ?");
+      ids.forEach((id, index) => stmt.run(index, id));
+    });
+    tx();
+    return true;
   },
   rename(id: number, name: string): void {
     getDb().prepare("UPDATE db_groups SET name = ? WHERE id = ?").run(name, id);

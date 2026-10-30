@@ -59,7 +59,7 @@ interface Db {
   avail_down: number;
   avail_last_check_at: string | null;
 }
-interface Group { id: number; name: string }
+interface Group { id: number; name: string; position: number }
 interface Backup {
   id: number; database_id: number; status: string; trigger: string;
   size_bytes: number | null; pg_major: number | null; created_at: string;
@@ -223,7 +223,9 @@ function ensureOpen(id: number) {
 }
 
 const sortedGroups = computed(() =>
-  [...groups.value].sort((a, b) => a.name.localeCompare(b.name, "fr", { sensitivity: "base" })),
+  [...groups.value].sort(
+    (a, b) => (a.position - b.position) || a.name.localeCompare(b.name, "fr", { sensitivity: "base" }),
+  ),
 );
 function dbsInGroup(id: number): Db[] {
   return dbs.value.filter((d) => d.group_id === id);
@@ -237,6 +239,8 @@ const editingGroupId = ref<number | null>(null);
 const editingGroupName = ref("");
 const skipGroupBlur = ref(false);
 const draggingId = ref<number | null>(null);
+const draggingGroupId = ref<number | null>(null);
+const groupInsert = ref<{ index: number; after: boolean } | null>(null);
 const dropTarget = ref<number | "root" | null>(null);
 
 const draggingFromGroup = computed(() => {
@@ -521,14 +525,83 @@ function onDragStart(e: DragEvent, id: number) {
 }
 function onDragEnd() {
   draggingId.value = null;
+  draggingGroupId.value = null;
+  groupInsert.value = null;
   dropTarget.value = null;
 }
 function onDrop(groupId: number | null) {
+  if (draggingGroupId.value != null) return;
   const id = draggingId.value;
   draggingId.value = null;
   dropTarget.value = null;
   if (id == null) return;
   void moveDb(id, groupId);
+}
+function onGroupDragStart(e: DragEvent, id: number) {
+  draggingGroupId.value = id;
+  draggingId.value = null;
+  e.dataTransfer?.setData("application/x-datasp-group", String(id));
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+}
+function onFolderDragOver(e: DragEvent, index: number) {
+  if (draggingGroupId.value == null) {
+    dropTarget.value = sortedGroups.value[index]?.id ?? null;
+    groupInsert.value = null;
+    return;
+  }
+  const el = e.currentTarget as HTMLElement;
+  const after = e.clientY > el.getBoundingClientRect().top + el.getBoundingClientRect().height / 2;
+  groupInsert.value = { index, after };
+  dropTarget.value = null;
+}
+function onRootDragOver() {
+  if (draggingGroupId.value != null) {
+    const last = sortedGroups.value.length - 1;
+    groupInsert.value = last >= 0 ? { index: last, after: true } : null;
+    dropTarget.value = null;
+    return;
+  }
+  dropTarget.value = "root";
+}
+async function reorderGroup(id: number, toIndex: number) {
+  const list = [...sortedGroups.value];
+  const from = list.findIndex((g) => g.id === id);
+  if (from < 0) return;
+  const insertAt = from < toIndex ? toIndex - 1 : toIndex;
+  if (insertAt === from) return;
+  const [item] = list.splice(from, 1);
+  list.splice(insertAt, 0, item!);
+  const previous = groups.value;
+  groups.value = list.map((g, index) => ({ ...g, position: index }));
+  try {
+    groups.value = await api.put<Group[]>("/api/groups/order", { ids: list.map((g) => g.id) });
+  } catch (e) {
+    groups.value = previous;
+    toasts.error("Échec : " + (e as { message?: string }).message);
+  }
+}
+function onFolderDrop(e: DragEvent, groupId: number, index: number) {
+  if (draggingGroupId.value != null) {
+    e.stopPropagation();
+    const id = draggingGroupId.value;
+    const insert = groupInsert.value;
+    const toIndex = insert && insert.index === index ? (insert.after ? index + 1 : index) : index;
+    draggingGroupId.value = null;
+    groupInsert.value = null;
+    void reorderGroup(id, toIndex);
+    return;
+  }
+  onDrop(groupId);
+}
+function onRootDrop() {
+  if (draggingGroupId.value != null) {
+    const id = draggingGroupId.value;
+    draggingGroupId.value = null;
+    groupInsert.value = null;
+    void reorderGroup(id, sortedGroups.value.length);
+    return;
+  }
+  onDrop(null);
 }
 
 // ---- add database ----
@@ -1064,14 +1137,31 @@ onUnmounted(() => {
       <button v-else class="btn secondary list-top-action" @click="openNewGroup">Nouveau groupe</button>
 
       <div
-        v-for="g in sortedGroups"
+        v-for="(g, index) in sortedGroups"
         :key="g.id"
         class="folder"
-        :class="{ 'drop-over': dropTarget === g.id && canDropOn(g.id) }"
-        @dragover.prevent="dropTarget = g.id"
-        @drop.prevent="onDrop(g.id)"
+        :class="{
+          'drop-over': dropTarget === g.id && canDropOn(g.id) && draggingGroupId == null,
+          'is-dragging': draggingGroupId === g.id,
+          'reorder-before': groupInsert?.index === index && !groupInsert.after && draggingGroupId !== g.id,
+          'reorder-after': groupInsert?.index === index && groupInsert.after && draggingGroupId !== g.id,
+        }"
+        @dragover.prevent="onFolderDragOver($event, index)"
+        @drop.prevent="onFolderDrop($event, g.id, index)"
       >
         <div class="folder-head" @click="toggleFolder(g.id)">
+          <span
+            class="folder-grip"
+            draggable="true"
+            title="Déplacer le groupe"
+            role="button"
+            aria-label="Déplacer le groupe"
+            @click.stop
+            @dragstart.stop="onGroupDragStart($event, g.id)"
+            @dragend="onDragEnd"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="1.3" /><circle cx="15" cy="7" r="1.3" /><circle cx="9" cy="12" r="1.3" /><circle cx="15" cy="12" r="1.3" /><circle cx="9" cy="17" r="1.3" /><circle cx="15" cy="17" r="1.3" /></svg>
+          </span>
           <svg class="chevron" :class="{ open: isOpen(g.id) }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 6 6 6-6 6" /></svg>
           <svg class="folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /></svg>
           <input
@@ -1124,8 +1214,8 @@ onUnmounted(() => {
       <div
         class="ungrouped"
         :class="{ 'drag-active': draggingFromGroup && dropTarget === 'root' }"
-        @dragover.prevent="dropTarget = 'root'"
-        @drop.prevent="onDrop(null)"
+        @dragover.prevent="onRootDragOver"
+        @drop.prevent="onRootDrop"
       >
         <div v-if="draggingFromGroup" class="drop-hint">Déposer pour retirer du groupe</div>
         <div

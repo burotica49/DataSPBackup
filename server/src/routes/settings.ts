@@ -40,7 +40,7 @@ function buildExport() {
   return {
     version: 1,
     exportedAt: new Date().toISOString(),
-    groups: folderList.map((g) => ({ name: g.name })),
+    groups: folderList.map((g) => ({ name: g.name, position: g.position })),
     databases: dbs.map((d) => ({
       name: d.name, host: d.host, port: d.port, db_name: d.db_name,
       username: d.username, ssl_mode: d.ssl_mode, is_supabase: d.is_supabase === 1,
@@ -134,7 +134,10 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       summary.groups++;
       return created.id;
     }
-    for (const g of data.groups ?? []) ensureGroup(g?.name);
+    const incomingGroups = [...(data.groups ?? [])].sort(
+      (a, b) => (Number(a?.position) || 0) - (Number(b?.position) || 0),
+    );
+    for (const g of incomingGroups) ensureGroup(g?.name);
 
     const existingDbNames = new Set(databases.list().map((d) => d.name));
     for (const d of data.databases ?? []) {

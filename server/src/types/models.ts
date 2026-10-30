@@ -50,6 +50,7 @@ export interface AvailabilityCheck {
 export interface DbGroup {
   id: number;
   name: string;
+  position: number;
   created_at: string;
 }
 
