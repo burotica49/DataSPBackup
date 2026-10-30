@@ -46,7 +46,7 @@ onUnmounted(() => clearTimeout(timer));
     <div class="row">
       <div class="card"><div class="muted">Schémas</div><div style="font-size: 24px; font-weight: 700">{{ v.schema_count ?? "—" }}</div></div>
       <div class="card"><div class="muted">Tables</div><div style="font-size: 24px; font-weight: 700">{{ v.table_count ?? "—" }}</div></div>
-      <div class="card"><div class="muted">Code de sortie pg_restore</div><div style="font-size: 24px; font-weight: 700">{{ v.exit_code ?? "—" }}</div></div>
+      <div class="card"><div class="muted">Code de sortie</div><div style="font-size: 24px; font-weight: 700">{{ v.exit_code ?? "—" }}</div></div>
     </div>
 
     <div v-if="v.report" class="card">

@@ -9,11 +9,25 @@ import { createDecryptStream } from "../services/crypto/crypto.js";
 import { requestBackup, requestRestore, requestVerification } from "../services/scheduler/jobs.js";
 import { requireAuth } from "../lib/auth.js";
 
+const noBreak = (s: string) => !/[\r\n\0]/.test(s);
+
+const connectionSchema = z.object({
+  host: z.string().trim().min(1, "Hôte requis").max(253)
+    .regex(/^[A-Za-z0-9:._-]+$/, "Hôte invalide"),
+  port: z.number({ invalid_type_error: "Port invalide" }).int().min(1).max(65535),
+  username: z.string().trim().min(1, "Utilisateur requis").max(128)
+    .regex(/^[A-Za-z0-9._-]+$/, "Utilisateur invalide"),
+  password: z.string().max(1024).refine(noBreak, "Mot de passe invalide"),
+  dbName: z.string().regex(/^[a-zA-Z0-9_]+$/, "Nom de base invalide (a-z, 0-9, _)"),
+  sslMode: z.enum(["disable", "prefer", "require"]).default("disable"),
+});
+
 const restoreSchema = z.object({
   mode: z.enum(["existing", "new"]),
   targetDatabaseId: z.number().int().positive().optional(),
   serverDatabaseId: z.number().int().positive().optional(),
   newDbName: z.string().regex(/^[a-zA-Z0-9_]+$/).optional(),
+  connection: connectionSchema.optional(),
   clean: z.boolean().default(false),
   wipeData: z.boolean().default(false),
   prepareSupabase: z.boolean().default(true),
@@ -70,9 +84,10 @@ export async function backupRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).send({ error: "Fichier d'archive absent" });
     }
     reply.header("Content-Type", "application/octet-stream");
+    const ext = b.file_path.endsWith(".sql.enc") || b.file_path.endsWith(".sql") ? "sql" : "dump";
     reply.header(
       "Content-Disposition",
-      `attachment; filename="backup-${b.id}.dump"`,
+      `attachment; filename="backup-${b.id}.${ext}"`,
     );
     const src = createReadStream(path);
     return reply.send(b.encrypted ? src.pipe(createDecryptStream()) : src);
@@ -100,13 +115,17 @@ export async function backupRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(409).send({ error: "Sauvegarde introuvable ou non réussie" });
     }
     const parsed = restoreSchema.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    if (!parsed.success) {
+      const message = parsed.error.issues.find((i) => i.message && !/^(Invalid|Expected|Required)/.test(i.message))?.message
+        ?? "Paramètres de restauration invalides";
+      return reply.code(400).send({ error: message });
+    }
     const d = parsed.data;
     if (d.mode === "existing" && !d.targetDatabaseId) {
       return reply.code(400).send({ error: "Base de destination requise" });
     }
-    if (d.mode === "new" && (!d.serverDatabaseId || !d.newDbName)) {
-      return reply.code(400).send({ error: "Serveur et nom de nouvelle base requis" });
+    if (d.mode === "new" && !d.connection && !(d.serverDatabaseId && d.newDbName)) {
+      return reply.code(400).send({ error: "Connexion de destination requise" });
     }
     if (d.clean && d.wipeData) {
       return reply.code(400).send({ error: "Choisir soit --clean, soit le vidage Supabase" });

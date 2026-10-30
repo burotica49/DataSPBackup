@@ -10,8 +10,10 @@ import { initDb } from "./db/index.js";
 import { storages, users } from "./models/repo.js";
 import { encryptString, hashPassword } from "./services/crypto/crypto.js";
 import { startScheduler } from "./services/scheduler/scheduler.js";
+import { startAvailabilityMonitor } from "./services/scheduler/availability.js";
 import { authRoutes } from "./routes/auth.js";
 import { databaseRoutes } from "./routes/databases.js";
+import { groupRoutes } from "./routes/groups.js";
 import { backupRoutes } from "./routes/backups.js";
 import { verificationRoutes } from "./routes/verifications.js";
 import { restoreRoutes } from "./routes/restores.js";
@@ -57,6 +59,7 @@ async function main(): Promise<void> {
 
   await app.register(authRoutes);
   await app.register(databaseRoutes);
+  await app.register(groupRoutes);
   await app.register(backupRoutes);
   await app.register(verificationRoutes);
   await app.register(restoreRoutes);
@@ -79,6 +82,7 @@ async function main(): Promise<void> {
   }
 
   startScheduler();
+  startAvailabilityMonitor();
 
   await app.listen({ port: config.port, host: config.host });
   logger.info({ port: config.port }, "dataspbackup démarré");

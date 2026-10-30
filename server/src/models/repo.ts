@@ -4,12 +4,14 @@ import type {
   BackupPolicy,
   BackupStatus,
   DatabaseSource,
+  DbGroup,
   NotificationChannel,
   Restore,
   Storage,
   User,
   Verification,
   VerificationStatus,
+  AvailabilityCheck,
 } from "../types/models.js";
 
 /** Accès typé aux métadonnées. Toutes les écritures passent par ici. */
@@ -56,10 +58,11 @@ export const databases = {
         `INSERT INTO databases
           (name, engine, host, port, db_name, username, password_enc,
            ssl_mode, included_schemas, excluded_tables, excluded_table_data,
-           ignore_user_mappings, is_supabase)
+           ignore_user_mappings, is_supabase, group_id)
          VALUES (@name, @engine, @host, @port, @db_name, @username,
                  @password_enc, @ssl_mode, @included_schemas, @excluded_tables,
-                 @excluded_table_data, @ignore_user_mappings, @is_supabase)`,
+                 @excluded_table_data, @ignore_user_mappings, @is_supabase,
+                 @group_id)`,
       )
       .run({
         name: d.name,
@@ -75,6 +78,7 @@ export const databases = {
         excluded_table_data: d.excluded_table_data ?? "[]",
         ignore_user_mappings: d.ignore_user_mappings ?? 0,
         is_supabase: d.is_supabase ?? 0,
+        group_id: d.group_id ?? null,
       });
     return this.get(Number(info.lastInsertRowid))!;
   },
@@ -84,6 +88,13 @@ export const databases = {
         "UPDATE databases SET pg_major = ?, updated_at = datetime('now') WHERE id = ?",
       )
       .run(major, id);
+  },
+  setServerVersion(id: number, version: string): void {
+    getDb()
+      .prepare(
+        "UPDATE databases SET server_version = ?, updated_at = datetime('now') WHERE id = ?",
+      )
+      .run(version, id);
   },
   update(id: number, patch: Partial<DatabaseSource>): void {
     const allowed = [
@@ -99,6 +110,15 @@ export const databases = {
       "excluded_table_data",
       "ignore_user_mappings",
       "is_supabase",
+      "group_id",
+      "avail_enabled",
+      "avail_notify",
+      "avail_interval_min",
+      "avail_attempts",
+      "avail_history_days",
+      "avail_fail_streak",
+      "avail_down",
+      "avail_last_check_at",
     ] as const;
     const keys = allowed.filter((k) => patch[k] !== undefined);
     if (!keys.length) return;
@@ -113,6 +133,85 @@ export const databases = {
   },
   remove(id: number): void {
     getDb().prepare("DELETE FROM databases WHERE id = ?").run(id);
+  },
+};
+
+// --- Disponibilité ---------------------------------------------------------
+export const availability = {
+  insert(row: Omit<AvailabilityCheck, "id">): AvailabilityCheck {
+    const info = getDb()
+      .prepare(
+        `INSERT INTO availability_checks
+          (database_id, ok, latency_ms, error, checked_at)
+         VALUES (@database_id, @ok, @latency_ms, @error, @checked_at)`,
+      )
+      .run(row);
+    return getDb()
+      .prepare("SELECT * FROM availability_checks WHERE id = ?")
+      .get(info.lastInsertRowid) as AvailabilityCheck;
+  },
+  listSince(databaseId: number, sinceIso: string): AvailabilityCheck[] {
+    return getDb()
+      .prepare(
+        `SELECT * FROM availability_checks
+         WHERE database_id = ? AND checked_at >= ?
+         ORDER BY checked_at ASC
+         LIMIT 20000`,
+      )
+      .all(databaseId, sinceIso) as AvailabilityCheck[];
+  },
+  purge(databaseId: number, historyDays: number): void {
+    const days = Math.max(1, Math.min(365, Math.trunc(historyDays) || 7));
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+    getDb()
+      .prepare(
+        "DELETE FROM availability_checks WHERE database_id = ? AND checked_at < ?",
+      )
+      .run(databaseId, cutoff);
+  },
+};
+
+// --- Groupes (dossiers de la liste) ----------------------------------------
+function sameGroupName(a: string, b: string): boolean {
+  return a.localeCompare(b, "fr", { sensitivity: "accent" }) === 0;
+}
+
+export const groups = {
+  list(): DbGroup[] {
+    return getDb()
+      .prepare("SELECT * FROM db_groups ORDER BY name")
+      .all() as DbGroup[];
+  },
+  get(id: number): DbGroup | undefined {
+    return getDb()
+      .prepare("SELECT * FROM db_groups WHERE id = ?")
+      .get(id) as DbGroup | undefined;
+  },
+  nameTaken(name: string, exceptId?: number): boolean {
+    return this.list().some(
+      (g) => g.id !== exceptId && sameGroupName(g.name, name),
+    );
+  },
+  create(name: string): DbGroup {
+    const info = getDb()
+      .prepare("INSERT INTO db_groups (name) VALUES (?)")
+      .run(name);
+    return this.get(Number(info.lastInsertRowid))!;
+  },
+  rename(id: number, name: string): void {
+    getDb().prepare("UPDATE db_groups SET name = ? WHERE id = ?").run(name, id);
+  },
+  /** Supprime le dossier. Les bases qu'il contient restent, sans groupe. */
+  remove(id: number): void {
+    const tx = getDb().transaction(() => {
+      getDb()
+        .prepare(
+          "UPDATE databases SET group_id = NULL, updated_at = datetime('now') WHERE group_id = ?",
+        )
+        .run(id);
+      getDb().prepare("DELETE FROM db_groups WHERE id = ?").run(id);
+    });
+    tx();
   },
 };
 

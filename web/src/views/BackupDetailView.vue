@@ -15,7 +15,7 @@ const toasts = useToasts();
 
 interface Backup {
   id: number; database_id: number; status: string; trigger: string;
-  size_bytes: number | null; pg_major: number | null; created_at: string;
+  size_bytes: number | null; pg_major: number | null; server_version: string | null; created_at: string;
   started_at: string | null; finished_at: string | null; encrypted: number;
   file_path: string | null; checksum: string | null; schemas_json: string | null; error: string | null;
 }
@@ -88,7 +88,7 @@ onUnmounted(() => clearTimeout(timer));
     <div class="row" style="margin-top:16px">
       <div class="card"><div class="muted">Taille</div><div style="font-size:22px;font-weight:700">{{ fmtSize(b.size_bytes) }}</div></div>
       <div class="card"><div class="muted">Durée</div><div style="font-size:22px;font-weight:700">{{ fmtDuration(b.started_at, b.finished_at) }}</div></div>
-      <div class="card"><div class="muted">Version PG</div><div style="font-size:22px;font-weight:700">{{ b.pg_major ?? "—" }}</div></div>
+      <div class="card"><div class="muted">{{ b.server_version ? 'Version MySQL' : 'Version PG' }}</div><div style="font-size:22px;font-weight:700">{{ b.server_version ?? b.pg_major ?? "—" }}</div></div>
     </div>
 
     <div class="card">

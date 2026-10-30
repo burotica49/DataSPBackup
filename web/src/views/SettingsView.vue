@@ -60,7 +60,7 @@ async function onImport(ev: Event) {
     const json = JSON.parse(await file.text());
     const res = await api.post<{ summary: Record<string, number> }>("/api/settings/import", json);
     const s = res.summary;
-    toasts.success(`Importé : ${s.databases} base(s), ${s.storages} stockage(s), ${s.policies} planif(s), ${s.channels} canal(aux)`);
+    toasts.success(`Importé : ${s.databases} base(s), ${s.groups ?? 0} groupe(s), ${s.storages} stockage(s), ${s.policies} planif(s), ${s.channels} canal(aux)`);
     await load();
   } catch (e) {
     toasts.error("Import échoué : " + (e as { message?: string }).message);
@@ -79,7 +79,7 @@ onMounted(load);
   <div class="card" style="margin-top: 18px">
     <h2>Export / import de configuration</h2>
     <p class="muted">
-      Exporte les bases, stockages, planifications, canaux de notification et
+      Exporte les bases, groupes, stockages, planifications, canaux de notification et
       réglages, <strong>sans les secrets</strong> (mots de passe, jetons).
       Après un import, re-saisis les mots de passe des bases et les jetons des
       canaux avant utilisation. Les entités dont le nom existe déjà sont ignorées.

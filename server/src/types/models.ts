@@ -22,8 +22,35 @@ export interface DatabaseSource {
   ignore_user_mappings: number;
   is_supabase: number;
   pg_major: number | null;
+  /** Chaîne VERSION() pour MySQL / MariaDB. */
+  server_version: string | null;
+  group_id: number | null;
+  /** Surveillance de disponibilité (0/1 et paramètres). */
+  avail_enabled: number;
+  avail_notify: number;
+  avail_interval_min: number;
+  avail_attempts: number;
+  avail_history_days: number;
+  avail_fail_streak: number;
+  avail_down: number;
+  avail_last_check_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface AvailabilityCheck {
+  id: number;
+  database_id: number;
+  ok: number;
+  latency_ms: number | null;
+  error: string | null;
+  checked_at: string;
+}
+
+export interface DbGroup {
+  id: number;
+  name: string;
+  created_at: string;
 }
 
 export interface Storage {
@@ -65,6 +92,7 @@ export interface Backup {
   file_path: string | null;
   encrypted: number;
   pg_major: number | null;
+  server_version: string | null;
   schemas_json: string | null;
   checksum: string | null;
   error: string | null;

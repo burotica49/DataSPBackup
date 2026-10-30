@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   channels,
   databases,
+  groups,
   policies,
   settings,
   storages,
@@ -25,8 +26,10 @@ const putSchema = z.object({
 function buildExport() {
   const dbs = databases.list();
   const strs = storages.list();
+  const folderList = groups.list();
   const dbName = new Map(dbs.map((d) => [d.id, d.name]));
   const stName = new Map(strs.map((s) => [s.id, s.name]));
+  const groupName = new Map(folderList.map((g) => [g.id, g.name]));
   let imageMap: Record<string, string> = {};
   try {
     const raw = settings.get(KEY);
@@ -37,10 +40,13 @@ function buildExport() {
   return {
     version: 1,
     exportedAt: new Date().toISOString(),
+    groups: folderList.map((g) => ({ name: g.name })),
     databases: dbs.map((d) => ({
       name: d.name, host: d.host, port: d.port, db_name: d.db_name,
       username: d.username, ssl_mode: d.ssl_mode, is_supabase: d.is_supabase === 1,
+      engine: d.engine === "mysql" ? "mysql" : "postgres",
       included_schemas: JSON.parse(d.included_schemas || "[]"),
+      group: d.group_id ? groupName.get(d.group_id) ?? null : null,
     })),
     storages: strs.map((s) => ({ name: s.name, type: s.type })),
     policies: policies.list().map((p) => ({
@@ -61,6 +67,7 @@ function buildExport() {
 }
 
 const importSchema = z.object({
+  groups: z.array(z.any()).optional(),
   databases: z.array(z.any()).optional(),
   storages: z.array(z.any()).optional(),
   policies: z.array(z.any()).optional(),
@@ -110,17 +117,37 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     const parsed = importSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: "Fichier de configuration invalide" });
     const data = parsed.data;
-    const summary = { databases: 0, storages: 0, policies: 0, channels: 0, settings: 0 };
+    const summary = { databases: 0, storages: 0, policies: 0, channels: 0, settings: 0, groups: 0 };
+
+    const groupIds = new Map(
+      groups.list().map((g) => [g.name.toLocaleLowerCase("fr"), g.id]),
+    );
+    function ensureGroup(name: unknown): number | null {
+      if (typeof name !== "string") return null;
+      const trimmed = name.trim();
+      if (!trimmed) return null;
+      const key = trimmed.toLocaleLowerCase("fr");
+      const existing = groupIds.get(key);
+      if (existing != null) return existing;
+      const created = groups.create(trimmed);
+      groupIds.set(key, created.id);
+      summary.groups++;
+      return created.id;
+    }
+    for (const g of data.groups ?? []) ensureGroup(g?.name);
 
     const existingDbNames = new Set(databases.list().map((d) => d.name));
     for (const d of data.databases ?? []) {
       if (!d?.name || existingDbNames.has(d.name)) continue;
       databases.create({
-        name: d.name, host: d.host ?? "", port: Number(d.port) || 5432,
-        db_name: d.db_name ?? "postgres", username: d.username ?? "postgres",
+        name: d.name, engine: d.engine === "mysql" ? "mysql" : "postgres",
+        host: d.host ?? "", port: Number(d.port) || (d.engine === "mysql" ? 3306 : 5432),
+        db_name: d.db_name || (d.engine === "mysql" ? "mysql" : "postgres"),
+        username: d.username ?? (d.engine === "mysql" ? "root" : "postgres"),
         password_enc: encryptString(""), ssl_mode: d.ssl_mode ?? "prefer",
         included_schemas: JSON.stringify(Array.isArray(d.included_schemas) ? d.included_schemas : []),
-        is_supabase: d.is_supabase ? 1 : 0,
+        is_supabase: d.engine === "mysql" ? 0 : d.is_supabase ? 1 : 0,
+        group_id: ensureGroup(d.group),
       });
       existingDbNames.add(d.name);
       summary.databases++;

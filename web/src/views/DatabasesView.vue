@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import TagSelect from "../components/TagSelect.vue";
 import BackupDetail from "./BackupDetailView.vue";
@@ -12,7 +12,7 @@ const toasts = useToasts();
 const route = useRoute();
 const router = useRouter();
 
-const TABS = ["config", "backups", "verifs", "restores"] as const;
+const TABS = ["config", "backups", "verifs", "availability", "restores"] as const;
 type Tab = (typeof TABS)[number];
 
 function queryValue(raw: unknown): string {
@@ -41,14 +41,25 @@ function readPlace(): { db: number | null; tab: Tab } {
 const storedPlace = readPlace();
 
 interface Db {
-  id: number; name: string; host: string; port: number; db_name: string;
+  id: number; name: string; engine: string; host: string; port: number; db_name: string;
   username: string; ssl_mode: string; is_supabase: number; pg_major: number | null;
+  server_version: string | null;
   included_schemas: string[];
   excluded_tables: string[];
   excluded_table_data: string[];
   ignore_user_mappings: number;
   has_password: boolean;
+  group_id: number | null;
+  avail_enabled: number;
+  avail_notify: number;
+  avail_interval_min: number;
+  avail_attempts: number;
+  avail_history_days: number;
+  avail_fail_streak: number;
+  avail_down: number;
+  avail_last_check_at: string | null;
 }
+interface Group { id: number; name: string }
 interface Backup {
   id: number; database_id: number; status: string; trigger: string;
   size_bytes: number | null; pg_major: number | null; created_at: string;
@@ -72,6 +83,7 @@ interface Store { id: number; name: string; type: string }
 interface Channel { id: number; type: string; name: string; on_failure: number; on_success: number; on_start: number }
 
 const dbs = ref<Db[]>([]);
+const groups = ref<Group[]>([]);
 const stores = ref<Store[]>([]);
 const channels = ref<Channel[]>([]);
 const allBackups = ref<Backup[]>([]);
@@ -89,6 +101,25 @@ const restoreSource = computed(() => {
   const id = backup?.database_id ?? selected.value?.id;
   return dbs.value.find((d) => d.id === id) ?? null;
 });
+const restoreCandidates = computed(() => {
+  const engine = restoreSource.value?.engine || "postgres";
+  return dbs.value.filter((d) => (d.engine || "postgres") === engine);
+});
+function engineLabel(d: { engine?: string; is_supabase: number }): string {
+  if (d.engine === "mysql") return "MySQL";
+  return d.is_supabase ? "Supabase" : "PostgreSQL";
+}
+function ouiNon(n: number | undefined): string { return n ? "Oui" : "Non"; }
+function dbBadge(d: Db): { cls: string; label: string } {
+  if (d.avail_enabled) {
+    if (!d.avail_last_check_at) return { cls: "neutral", label: "Surveillance" };
+    if (d.avail_down) return { cls: "failed", label: "Indisponible" };
+    if (d.avail_fail_streak > 0) return { cls: "warn", label: "Échec" };
+    return { cls: "available", label: "Disponible" };
+  }
+  if (d.pg_major || d.server_version) return { cls: "available", label: "Disponible" };
+  return { cls: "neutral", label: "Non testé" };
+}
 
 // ---- helpers ----
 // created_at = "YYYY-MM-DD HH:MM:SS" (UTC, sans Z) → +Z ; started/finished = ISO (déjà Z)
@@ -133,14 +164,103 @@ const TIP_TABLES = "La table est absente de la sauvegarde (schéma et données).
 const TIP_DATA = "La structure est sauvegardée, pas les lignes. Ex. public.history";
 const TIP_MAPPINGS = "Les correspondances d'utilisateurs (USER MAPPING des serveurs distants) ne sont pas restaurées.";
 
+// ---- groupes (dossiers) ----
+const FOLDER_KEY = "dataspbackup.folders";
+const openIds = ref<number[]>([]);
+const knownFolderIds = ref<number[]>([]);
+let folderStateLoaded = false;
+
+function readFolders(): { open: number[]; known: number[] } | null {
+  try {
+    const raw = localStorage.getItem(FOLDER_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { open?: unknown; known?: unknown };
+    const nums = (v: unknown) =>
+      Array.isArray(v) ? v.filter((n): n is number => Number.isInteger(n) && n > 0) : [];
+    return { open: nums(parsed.open), known: nums(parsed.known) };
+  } catch {
+    return null;
+  }
+}
+function writeFolders() {
+  localStorage.setItem(
+    FOLDER_KEY,
+    JSON.stringify({ open: openIds.value, known: knownFolderIds.value }),
+  );
+}
+function syncFolders(list: Group[]) {
+  const ids = list.map((g) => g.id);
+  const idSet = new Set(ids);
+  if (!folderStateLoaded) {
+    folderStateLoaded = true;
+    const saved = readFolders();
+    if (!saved) {
+      openIds.value = [...ids];
+    } else {
+      const known = new Set(saved.known);
+      const open = new Set(saved.open);
+      for (const id of ids) if (!known.has(id)) open.add(id);
+      openIds.value = [...open].filter((id) => idSet.has(id));
+    }
+  } else {
+    const known = new Set(knownFolderIds.value);
+    const open = new Set(openIds.value);
+    for (const id of ids) if (!known.has(id)) open.add(id);
+    openIds.value = [...open].filter((id) => idSet.has(id));
+  }
+  knownFolderIds.value = ids;
+  writeFolders();
+}
+function isOpen(id: number) { return openIds.value.includes(id); }
+function toggleFolder(id: number) {
+  openIds.value = isOpen(id)
+    ? openIds.value.filter((x) => x !== id)
+    : [...openIds.value, id];
+  writeFolders();
+}
+function ensureOpen(id: number) {
+  if (!isOpen(id)) toggleFolder(id);
+}
+
+const sortedGroups = computed(() =>
+  [...groups.value].sort((a, b) => a.name.localeCompare(b.name, "fr", { sensitivity: "base" })),
+);
+function dbsInGroup(id: number): Db[] {
+  return dbs.value.filter((d) => d.group_id === id);
+}
+const ungrouped = computed(() => dbs.value.filter((d) => d.group_id == null));
+
+const showNewGroup = ref(false);
+const groupName = ref("");
+const groupNameInput = ref<HTMLInputElement | null>(null);
+const editingGroupId = ref<number | null>(null);
+const editingGroupName = ref("");
+const skipGroupBlur = ref(false);
+const draggingId = ref<number | null>(null);
+const dropTarget = ref<number | "root" | null>(null);
+
+const draggingFromGroup = computed(() => {
+  const id = draggingId.value;
+  if (id == null) return false;
+  return dbs.value.find((d) => d.id === id)?.group_id != null;
+});
+function canDropOn(groupId: number | null): boolean {
+  const id = draggingId.value;
+  if (id == null) return false;
+  const current = dbs.value.find((d) => d.id === id)?.group_id ?? null;
+  return current !== groupId;
+}
+
 // ---- loading ----
 async function loadAll() {
-  [dbs.value, stores.value, channels.value, allBackups.value] = await Promise.all([
+  [dbs.value, groups.value, stores.value, channels.value, allBackups.value] = await Promise.all([
     api.get<Db[]>("/api/databases"),
+    api.get<Group[]>("/api/groups"),
     api.get<Store[]>("/api/storages"),
     api.get<Channel[]>("/api/notifications"),
     api.get<Backup[]>("/api/backups"),
   ]);
+  syncFolders(groups.value);
   const known = (id: number | null) => id != null && dbs.value.some((d) => d.id === id);
   const preferred = queryDb(route.query.db) ?? (known(pendingDb.value) ? pendingDb.value : selectedId.value);
   const next = known(preferred) ? preferred : (dbs.value[0]?.id ?? null);
@@ -260,18 +380,25 @@ async function loadDetail(id: number) {
   }
   if (gen === detailSeq) armRefresh();
 }
-function resetEdits() { editName.value = false; editParams.value = false; editVerif.value = false; editPolicy.value = false; }
+const editAvail = ref(false);
+function resetEdits() { editName.value = false; editParams.value = false; editVerif.value = false; editPolicy.value = false; editAvail.value = false; }
 watch(selectedId, (id) => { if (id != null) { showAdd.value = false; resetEdits(); loadDetail(id); } });
 
-function select(id: number) { selectedId.value = id; tab.value = "config"; }
+function select(id: number) {
+  selectedId.value = id;
+  tab.value = "config";
+  const gid = dbs.value.find((d) => d.id === id)?.group_id;
+  if (gid != null) ensureOpen(gid);
+}
 
 // ---- actions ----
 async function test() {
   if (!selected.value) return;
   toasts.info("Test de connexion…");
   try {
-    const r = await api.post<{ pg_major: number }>(`/api/databases/${selected.value.id}/test`);
-    toasts.success(`Connexion OK — PostgreSQL ${r.pg_major}`);
+    const r = await api.post<{ pg_major?: number; server_version?: string; engine?: string }>(`/api/databases/${selected.value.id}/test`);
+    if (r.engine === "mysql") toasts.success(`Connexion OK — MySQL ${r.server_version}`);
+    else toasts.success(`Connexion OK — PostgreSQL ${r.pg_major}`);
     await loadAll();
   } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
 }
@@ -315,20 +442,132 @@ async function doConfirm() {
   await fn();
 }
 
+function openNewGroup() {
+  showNewGroup.value = true;
+  groupName.value = "";
+  nextTick(() => groupNameInput.value?.focus());
+}
+async function createGroup() {
+  const name = groupName.value.trim();
+  if (!name) return;
+  try {
+    const created = await api.post<Group>("/api/groups", { name });
+    groups.value = [...groups.value, created];
+    knownFolderIds.value = [...knownFolderIds.value, created.id];
+    ensureOpen(created.id);
+    showNewGroup.value = false;
+    groupName.value = "";
+    toasts.success("Groupe créé");
+  } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
+}
+function startRenameGroup(g: Group) {
+  editingGroupId.value = g.id;
+  editingGroupName.value = g.name;
+  nextTick(() => {
+    const el = document.getElementById(`group-rename-${g.id}`) as HTMLInputElement | null;
+    el?.focus();
+    el?.select();
+  });
+}
+function cancelRenameGroup() {
+  skipGroupBlur.value = true;
+  editingGroupId.value = null;
+}
+async function saveGroupRename(g: Group) {
+  if (skipGroupBlur.value) { skipGroupBlur.value = false; return; }
+  if (editingGroupId.value !== g.id) return;
+  const name = editingGroupName.value.trim();
+  editingGroupId.value = null;
+  if (!name || name === g.name) return;
+  try {
+    const updated = await api.patch<Group>(`/api/groups/${g.id}`, { name });
+    const i = groups.value.findIndex((x) => x.id === g.id);
+    if (i >= 0) groups.value[i] = updated;
+    toasts.success("Groupe renommé");
+  } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
+}
+function removeGroup(g: Group) {
+  askConfirm(`Supprimer le groupe « ${g.name} » ? Les bases restent dans la liste.`, async () => {
+    try {
+      await api.del(`/api/groups/${g.id}`);
+      groups.value = groups.value.filter((x) => x.id !== g.id);
+      for (const d of dbs.value) if (d.group_id === g.id) d.group_id = null;
+      openIds.value = openIds.value.filter((id) => id !== g.id);
+      knownFolderIds.value = knownFolderIds.value.filter((id) => id !== g.id);
+      writeFolders();
+      toasts.success("Groupe supprimé");
+    } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
+  });
+}
+async function moveDb(id: number, groupId: number | null) {
+  const d = dbs.value.find((x) => x.id === id);
+  if (!d || (d.group_id ?? null) === groupId) return;
+  try {
+    await api.patch(`/api/databases/${id}`, { group_id: groupId });
+    d.group_id = groupId;
+    if (groupId != null) ensureOpen(groupId);
+    toasts.success(groupId == null ? "Base retirée du groupe" : "Base déplacée");
+  } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
+}
+function onGroupSelect(e: Event) {
+  if (!selected.value) return;
+  const raw = (e.target as HTMLSelectElement).value;
+  void moveDb(selected.value.id, raw === "" ? null : Number(raw));
+}
+function onDragStart(e: DragEvent, id: number) {
+  draggingId.value = id;
+  e.dataTransfer?.setData("text/plain", String(id));
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+}
+function onDragEnd() {
+  draggingId.value = null;
+  dropTarget.value = null;
+}
+function onDrop(groupId: number | null) {
+  const id = draggingId.value;
+  draggingId.value = null;
+  dropTarget.value = null;
+  if (id == null) return;
+  void moveDb(id, groupId);
+}
+
 // ---- add database ----
 const showAdd = ref(false);
 const blank = () => ({
-  name: "", host: "", port: 5432, db_name: "postgres", username: "postgres",
+  name: "", engine: "postgres" as "postgres" | "mysql",
+  host: "", port: 5432, db_name: "postgres", username: "postgres",
   password: "", ssl_mode: "prefer", is_supabase: true,
   included_schemas: ["public", "auth", "storage"],
   excluded_tables: [] as string[],
   excluded_table_data: [] as string[],
   ignore_user_mappings: false,
+  group_id: null as number | null,
 });
 const form = ref(blank());
 function openAdd() { showAdd.value = true; resetEdits(); form.value = blank(); selectedId.value = null; }
+function onEngineChange() {
+  if (form.value.engine === "mysql") {
+    if (form.value.port === 5432) form.value.port = 3306;
+    if (form.value.db_name === "postgres") form.value.db_name = "";
+    if (form.value.username === "postgres") form.value.username = "root";
+    form.value.is_supabase = false;
+    form.value.included_schemas = [];
+    form.value.ignore_user_mappings = false;
+  } else {
+    if (form.value.port === 3306) form.value.port = 5432;
+    if (!form.value.db_name) form.value.db_name = "postgres";
+    if (form.value.username === "root") form.value.username = "postgres";
+    form.value.is_supabase = true;
+    form.value.included_schemas = ["public", "auth", "storage"];
+  }
+}
 async function createDb() {
-  const payload = { ...form.value, port: Number(form.value.port) };
+  const gid = form.value.group_id;
+  const payload = {
+    ...form.value,
+    port: Number(form.value.port),
+    group_id: gid == null ? null : Number(gid),
+  };
   try {
     const created = await api.post<Db>("/api/databases", payload);
     showAdd.value = false;
@@ -401,7 +640,9 @@ function openVerif() {
 async function saveVerif() {
   if (!selected.value) return;
   try {
-    await api.patch(`/api/databases/${selected.value.id}`, { is_supabase: verifForm.value.is_supabase });
+    if (selected.value.engine !== "mysql") {
+      await api.patch(`/api/databases/${selected.value.id}`, { is_supabase: verifForm.value.is_supabase });
+    }
     if (policy.value) await api.patch(`/api/policies/${policy.value.id}`, { verify_after: verifForm.value.verify_after });
     editVerif.value = false;
     toasts.success("Vérification enregistrée");
@@ -409,6 +650,132 @@ async function saveVerif() {
     await loadDetail(selected.value.id);
   } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
 }
+
+// ---- vérification de disponibilité ----
+const availForm = ref({ enabled: false, notify: true, interval_min: 1, attempts: 3, history_days: 7 });
+const availPeriod = ref<"today" | "24h" | "7d">("today");
+const availChecks = ref<AvailCheck[]>([]);
+const availBusy = ref(false);
+let availTimer = 0;
+let availSeq = 0;
+interface AvailCheck {
+  id: number; ok: number; latency_ms: number | null; error: string | null; checked_at: string;
+}
+interface AvailPayload {
+  down: boolean; fail_streak: number; last_check_at: string | null; checks: AvailCheck[];
+}
+function sinceFor(period: "today" | "24h" | "7d"): string {
+  const now = new Date();
+  if (period === "today") {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    return start.toISOString();
+  }
+  const ms = period === "24h" ? 86_400_000 : 7 * 86_400_000;
+  return new Date(now.getTime() - ms).toISOString();
+}
+function applyAvail(id: number, data: AvailPayload) {
+  const d = dbs.value.find((x) => x.id === id);
+  if (!d) return;
+  d.avail_down = data.down ? 1 : 0;
+  d.avail_fail_streak = data.fail_streak;
+  d.avail_last_check_at = data.last_check_at;
+}
+async function loadAvailability() {
+  const id = selectedId.value;
+  if (id == null || tab.value !== "availability") return;
+  const gen = ++availSeq;
+  try {
+    const data = await api.get<AvailPayload>(
+      `/api/databases/${id}/availability?since=${encodeURIComponent(sinceFor(availPeriod.value))}`,
+    );
+    if (gen !== availSeq || selectedId.value !== id) return;
+    availChecks.value = data.checks;
+    applyAvail(id, data);
+  } catch { /* le prochain rafraîchissement réessaie */ }
+}
+function stopAvailPoll() { window.clearInterval(availTimer); availTimer = 0; }
+watch([tab, selectedId, availPeriod], () => {
+  stopAvailPoll();
+  if (tab.value !== "availability" || selectedId.value == null) {
+    if (tab.value !== "availability") availChecks.value = [];
+    return;
+  }
+  void loadAvailability();
+  availTimer = window.setInterval(() => { void loadAvailability(); }, 15_000);
+}, { immediate: true });
+function openAvail() {
+  const d = selected.value; if (!d) return;
+  availForm.value = {
+    enabled: d.avail_enabled === 1,
+    notify: d.avail_notify === 1,
+    interval_min: d.avail_interval_min || 1,
+    attempts: d.avail_attempts || 3,
+    history_days: d.avail_history_days || 7,
+  };
+  editAvail.value = true;
+}
+function clampInt(n: number, min: number, max: number): number | null {
+  if (!Number.isFinite(n)) return null;
+  const v = Math.round(n);
+  return v >= min && v <= max ? v : null;
+}
+async function saveAvail() {
+  if (!selected.value) return;
+  const interval = clampInt(availForm.value.interval_min, 1, 1440);
+  const attempts = clampInt(availForm.value.attempts, 1, 30);
+  const history = clampInt(availForm.value.history_days, 1, 365);
+  if (interval == null || attempts == null || history == null) {
+    toasts.error("Intervalle (1–1440 min), tentatives (1–30) ou historique (1–365 jours) invalide");
+    return;
+  }
+  try {
+    await api.patch(`/api/databases/${selected.value.id}`, {
+      avail_enabled: availForm.value.enabled,
+      avail_notify: availForm.value.notify,
+      avail_interval_min: interval,
+      avail_attempts: attempts,
+      avail_history_days: history,
+    });
+    editAvail.value = false;
+    toasts.success("Disponibilité enregistrée");
+    await loadAll();
+  } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
+}
+async function checkNow() {
+  if (!selected.value || availBusy.value) return;
+  availBusy.value = true;
+  try {
+    const data = await api.post<AvailPayload & { check: AvailCheck }>(
+      `/api/databases/${selected.value.id}/availability/check`,
+    );
+    applyAvail(selected.value.id, data);
+    await loadAvailability();
+    if (data.check.ok) toasts.success("Base disponible");
+    else toasts.error(data.down ? "Base indisponible" : "La base n'a pas répondu");
+  } catch (e) { toasts.error("Échec : " + (e as { message?: string }).message); }
+  finally { availBusy.value = false; }
+}
+function cellTitle(c: AvailCheck): string {
+  const state = c.ok ? "Disponible" : `Échec${c.error ? " : " + c.error : ""}`;
+  const ms = c.latency_ms != null ? ` · ${c.latency_ms} ms` : "";
+  return `${fmtDate(c.checked_at)} — ${state}${ms}`;
+}
+const availStatusLabel = computed(() => {
+  const d = selected.value;
+  if (!d?.avail_enabled) return "Surveillance inactive";
+  if (!d.avail_last_check_at) return "En attente de la première vérification";
+  if (d.avail_down) return "Indisponible";
+  if (d.avail_fail_streak > 0) return `Échec ${d.avail_fail_streak}/${d.avail_attempts || 3}`;
+  return "Disponible";
+});
+const lastAvailError = computed(() => {
+  for (let i = availChecks.value.length - 1; i >= 0; i--) {
+    const c = availChecks.value[i];
+    if (c && c.ok !== 1 && c.error) return c.error;
+  }
+  return "";
+});
 
 // ---- configuration des sauvegardes (politique, façon Databasus) ----
 const editPolicy = ref(false);
@@ -504,9 +871,104 @@ function deleteBackup(id: number) {
 const showRestore = ref(false);
 const restoreBackupId = ref<number | null>(null);
 const rform = ref({
-  mode: "existing" as "existing" | "new", targetDatabaseId: 0, serverDatabaseId: 0,
-  newDbName: "", clean: false, wipeData: false, prepareSupabase: true, confirm: false,
+  mode: "existing" as "existing" | "new", targetDatabaseId: 0,
+  clean: false, wipeData: false, prepareSupabase: true, confirm: false,
 });
+interface ConnDraft {
+  host: string; port: string; username: string; password: string; dbName: string; sslMode: string;
+}
+function emptyConn(): ConnDraft {
+  return { host: "", port: "", username: "", password: "", dbName: "postgres", sslMode: "disable" };
+}
+const rconn = ref<ConnDraft>(emptyConn());
+const showConnPw = ref(false);
+const connErrorMsg = ref("");
+
+const SSL_FROM_CLIP: Record<string, string> = {
+  disable: "disable", allow: "prefer", prefer: "prefer",
+  require: "require", "verify-ca": "require", "verify-full": "require",
+};
+function decUri(s: string): string {
+  try { return decodeURIComponent(s); } catch { return s; }
+}
+function parsePgClipboard(raw: string): Partial<ConnDraft> | null {
+  const text = raw.trim();
+  if (!text) return null;
+  const uriMatch = text.match(/postgres(?:ql)?:\/\/\S+/i);
+  if (uriMatch) {
+    try {
+      const u = new URL(uriMatch[0].replace(/^postgres(?:ql)?:\/\//i, "http://"));
+      const db = decUri(u.pathname.replace(/^\//, "").split("/")[0] || "");
+      const ssl = SSL_FROM_CLIP[(u.searchParams.get("sslmode") ?? "").toLowerCase()];
+      if (u.hostname) {
+        return {
+          host: u.hostname,
+          port: u.port || "5432",
+          ...(u.username ? { username: decUri(u.username) } : {}),
+          ...(u.password ? { password: decUri(u.password) } : {}),
+          ...(db ? { dbName: db } : {}),
+          ...(ssl ? { sslMode: ssl } : {}),
+        };
+      }
+    } catch { /* essai au format mot-clé */ }
+  }
+  const map: Record<string, string> = {};
+  const re = /\b(host|port|user|username|password|dbname|database|sslmode)\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+))/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) map[m[1].toLowerCase()] = m[2] ?? m[3] ?? m[4] ?? "";
+  if (!map.host && !map.user && !map.username) return null;
+  const ssl = SSL_FROM_CLIP[(map.sslmode ?? "").toLowerCase()];
+  return {
+    ...(map.host ? { host: map.host } : {}),
+    ...(map.port ? { port: map.port } : {}),
+    ...((map.user || map.username) ? { username: map.user || map.username } : {}),
+    ...(map.password ? { password: map.password } : {}),
+    ...((map.dbname || map.database) ? { dbName: map.dbname || map.database } : {}),
+    ...(ssl ? { sslMode: ssl } : {}),
+  };
+}
+function parseMysqlClipboard(raw: string): Partial<ConnDraft> | null {
+  const uriMatch = raw.trim().match(/mysql:\/\/\S+/i);
+  if (!uriMatch) return null;
+  try {
+    const u = new URL(uriMatch[0].replace(/^mysql:\/\//i, "http://"));
+    const db = decUri(u.pathname.replace(/^\//, "").split("/")[0] || "");
+    if (!u.hostname) return null;
+    return {
+      host: u.hostname,
+      port: u.port || "3306",
+      ...(u.username ? { username: decUri(u.username) } : {}),
+      ...(u.password ? { password: decUri(u.password) } : {}),
+      ...(db ? { dbName: db } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+async function fillConnFromClipboard() {
+  try {
+    const text = await navigator.clipboard.readText();
+    const parsed = parsePgClipboard(text) ?? parseMysqlClipboard(text);
+    if (!parsed) {
+      toasts.error("Presse-papiers : chaîne de connexion non reconnue");
+      return;
+    }
+    rconn.value = { ...rconn.value, ...parsed };
+    showConnPw.value = false;
+    toasts.success("Connexion renseignée");
+  } catch {
+    toasts.error("Impossible de lire le presse-papiers");
+  }
+}
+function connProblem(): string | null {
+  const c = rconn.value;
+  if (!c.host.trim()) return "Hôte requis";
+  const port = Number(c.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return "Port invalide";
+  if (!c.username.trim()) return "Nom d'utilisateur requis";
+  if (!/^[a-zA-Z0-9_]+$/.test(c.dbName)) return "Nom de base invalide (a-z, 0-9, _)";
+  return null;
+}
 function targetIsSupabase(id: number): boolean {
   return dbs.value.find((d) => d.id === Number(id))?.is_supabase === 1;
 }
@@ -524,12 +986,23 @@ function onClean() {
 }
 function openRestore(id: number) {
   restoreBackupId.value = id;
-  const first = dbs.value[0]?.id ?? 0;
-  const supabase = targetIsSupabase(first);
+  const backup = backups.value.find((b) => b.id === id);
+  const source = dbs.value.find((d) => d.id === (backup?.database_id ?? selected.value?.id));
+  const engine = source?.engine || "postgres";
+  const candidates = dbs.value.filter((d) => (d.engine || "postgres") === engine);
+  const first = candidates[0]?.id ?? 0;
+  const supabase = engine !== "mysql" && targetIsSupabase(first);
   rform.value = {
-    mode: "existing", targetDatabaseId: first, serverDatabaseId: first, newDbName: "",
-    clean: false, wipeData: supabase, prepareSupabase: true, confirm: false,
+    mode: "existing", targetDatabaseId: first,
+    clean: false, wipeData: supabase, prepareSupabase: engine !== "mysql", confirm: false,
   };
+  rconn.value = emptyConn();
+  if (engine === "mysql") {
+    rconn.value.port = "3306";
+    rconn.value.dbName = "";
+  }
+  showConnPw.value = false;
+  connErrorMsg.value = "";
   showRestore.value = true;
 }
 async function launchRestore() {
@@ -541,7 +1014,20 @@ async function launchRestore() {
     prepareSupabase: rform.value.prepareSupabase,
   };
   if (rform.value.mode === "existing") body.targetDatabaseId = Number(rform.value.targetDatabaseId);
-  else { body.serverDatabaseId = Number(rform.value.serverDatabaseId); body.newDbName = rform.value.newDbName; }
+  else {
+    const problem = connProblem();
+    if (problem) { connErrorMsg.value = problem; toasts.error(problem); return; }
+    connErrorMsg.value = "";
+    const c = rconn.value;
+    body.connection = {
+      host: c.host.trim(),
+      port: Number(c.port),
+      username: c.username.trim(),
+      password: c.password,
+      dbName: c.dbName.trim(),
+      sslMode: c.sslMode,
+    };
+  }
   try {
     const res = await api.post<{ restore_id: number }>(`/api/backups/${restoreBackupId.value}/restore`, body);
     showRestore.value = false;
@@ -555,6 +1041,7 @@ onMounted(() => { loadAll(); window.addEventListener("keydown", onDetailKey); })
 onUnmounted(() => {
   window.removeEventListener("keydown", onDetailKey);
   window.clearTimeout(refreshTimer);
+  stopAvailPoll();
   detailSeq += 1;
 });
 </script>
@@ -563,20 +1050,108 @@ onUnmounted(() => {
   <div class="master-detail">
     <!-- ---------- Liste des bases ---------- -->
     <aside class="list-panel">
-      <div v-for="d in dbs" :key="d.id" class="db-card" :class="{ active: d.id === selectedId }" @click="select(d.id)">
-        <div class="db-name">
-          {{ d.name }}
-          <span v-if="!d.has_password" class="badge warn">Mot de passe requis</span>
-          <span v-else-if="d.pg_major" class="badge available">Disponible</span>
-          <span v-else class="badge neutral">Non testé</span>
+      <div v-if="showNewGroup" class="new-group">
+        <input
+          ref="groupNameInput"
+          v-model="groupName"
+          placeholder="Nom du groupe"
+          @keydown.enter.prevent="createGroup"
+          @keydown.escape.prevent="showNewGroup = false"
+        />
+        <button class="btn" :disabled="!groupName.trim()" @click="createGroup">Créer</button>
+        <button class="btn secondary" @click="showNewGroup = false">Annuler</button>
+      </div>
+      <button v-else class="btn secondary list-top-action" @click="openNewGroup">Nouveau groupe</button>
+
+      <div
+        v-for="g in sortedGroups"
+        :key="g.id"
+        class="folder"
+        :class="{ 'drop-over': dropTarget === g.id && canDropOn(g.id) }"
+        @dragover.prevent="dropTarget = g.id"
+        @drop.prevent="onDrop(g.id)"
+      >
+        <div class="folder-head" @click="toggleFolder(g.id)">
+          <svg class="chevron" :class="{ open: isOpen(g.id) }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 6 6 6-6 6" /></svg>
+          <svg class="folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /></svg>
+          <input
+            v-if="editingGroupId === g.id"
+            :id="`group-rename-${g.id}`"
+            v-model="editingGroupName"
+            class="folder-rename"
+            @click.stop
+            @keydown.enter.prevent="saveGroupRename(g)"
+            @keydown.escape.prevent="cancelRenameGroup"
+            @blur="saveGroupRename(g)"
+          />
+          <span v-else class="folder-name">{{ g.name }}</span>
+          <span class="folder-count">{{ dbsInGroup(g.id).length }}</span>
+          <span class="folder-actions" @click.stop>
+            <button class="icon-btn" title="Renommer" @click="startRenameGroup(g)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+            </button>
+            <button class="icon-btn danger" title="Supprimer le groupe" @click="removeGroup(g)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" /></svg>
+            </button>
+          </span>
         </div>
-        <div class="db-meta">
-          Stockage : Stockage local<br />
-          <template v-if="lastBackup(d.id)">Dernière sauvegarde {{ fmtAgo(lastBackup(d.id)!.created_at) }}</template>
-          <template v-else>Aucune sauvegarde</template>
+        <div v-show="isOpen(g.id)" class="folder-body">
+          <div
+            v-for="d in dbsInGroup(g.id)"
+            :key="d.id"
+            class="db-card"
+            :class="{ active: d.id === selectedId }"
+            draggable="true"
+            @click="select(d.id)"
+            @dragstart="onDragStart($event, d.id)"
+            @dragend="onDragEnd"
+          >
+            <div class="db-name">
+              {{ d.name }}
+              <span v-if="!d.has_password" class="badge warn">Mot de passe requis</span>
+              <span v-else class="badge" :class="dbBadge(d).cls">{{ dbBadge(d).label }}</span>
+            </div>
+            <div class="db-meta">
+              {{ engineLabel(d) }}<br />
+              <template v-if="lastBackup(d.id)">Dernière sauvegarde {{ fmtAgo(lastBackup(d.id)!.created_at) }}</template>
+              <template v-else>Aucune sauvegarde</template>
+            </div>
+          </div>
+          <div v-if="!dbsInGroup(g.id).length" class="folder-empty">Glisser une base ici</div>
         </div>
       </div>
-      <button class="btn" style="width: 100%; margin-top: 6px" @click="openAdd">Ajouter une base de données</button>
+
+      <div
+        class="ungrouped"
+        :class="{ 'drag-active': draggingFromGroup && dropTarget === 'root' }"
+        @dragover.prevent="dropTarget = 'root'"
+        @drop.prevent="onDrop(null)"
+      >
+        <div v-if="draggingFromGroup" class="drop-hint">Déposer pour retirer du groupe</div>
+        <div
+          v-for="d in ungrouped"
+          :key="d.id"
+          class="db-card"
+          :class="{ active: d.id === selectedId }"
+          draggable="true"
+          @click="select(d.id)"
+          @dragstart="onDragStart($event, d.id)"
+          @dragend="onDragEnd"
+        >
+          <div class="db-name">
+            {{ d.name }}
+            <span v-if="!d.has_password" class="badge warn">Mot de passe requis</span>
+            <span v-else class="badge" :class="dbBadge(d).cls">{{ dbBadge(d).label }}</span>
+          </div>
+          <div class="db-meta">
+            {{ engineLabel(d) }}<br />
+            <template v-if="lastBackup(d.id)">Dernière sauvegarde {{ fmtAgo(lastBackup(d.id)!.created_at) }}</template>
+            <template v-else>Aucune sauvegarde</template>
+          </div>
+        </div>
+      </div>
+
+      <button class="btn list-add" @click="openAdd">Ajouter une base de données</button>
       <div class="list-caption">Une base de données, c'est ce que nous sauvegardons</div>
     </aside>
 
@@ -584,12 +1159,30 @@ onUnmounted(() => {
     <section class="detail-panel">
       <!-- Formulaire ajout -->
       <div v-if="showAdd">
-        <h1>Nouvelle base PostgreSQL / Supabase</h1>
-        <div class="card" style="margin-top: 14px; max-width: 720px">
+        <h1>{{ form.engine === 'mysql' ? 'Nouvelle base MySQL' : 'Nouvelle base PostgreSQL / Supabase' }}</h1>
+        <div class="card" style="margin-top: 16px;"">
+          <div class="row">
+            <div>
+              <label>Moteur</label>
+              <select v-model="form.engine" @change="onEngineChange">
+                <option value="postgres">PostgreSQL / Supabase</option>
+                <option value="mysql">MySQL</option>
+              </select>
+            </div>
+          </div>
           <div class="row">
             <div><label>Nom</label><input v-model="form.name" /></div>
-            <div><label>Hôte</label><input v-model="form.host" placeholder="db.xxx.supabase.co / pooler" /></div>
+            <div><label>Hôte</label><input v-model="form.host" :placeholder="form.engine === 'mysql' ? 'mysql.exemple.com' : 'db.xxx.supabase.co / pooler'" /></div>
             <div style="max-width:110px"><label>Port</label><input v-model="form.port" type="number" /></div>
+          </div>
+          <div v-if="groups.length" class="row">
+            <div>
+              <label>Groupe</label>
+              <select v-model="form.group_id">
+                <option :value="null">Sans groupe</option>
+                <option v-for="g in sortedGroups" :key="g.id" :value="g.id">{{ g.name }}</option>
+              </select>
+            </div>
           </div>
           <div class="row">
             <div><label>Base</label><input v-model="form.db_name" /></div>
@@ -600,24 +1193,25 @@ onUnmounted(() => {
             <div style="max-width:160px"><label>Mode SSL</label><select v-model="form.ssl_mode"><option v-for="m in SSL_MODES" :key="m.value" :value="m.value">{{ m.label }}</option></select></div>
           </div>
           <div class="dump-filters">
-            <div class="dump-row">
+            <div v-if="form.engine !== 'mysql'" class="dump-row">
               <span class="k">Schémas inclus</span>
               <TagSelect v-model="form.included_schemas" placeholder="Tous les schémas" />
             </div>
             <div class="dump-row">
-              <span class="k">Tables exclues entièrement <i class="info-dot" :title="TIP_TABLES">i</i></span>
+              <span class="k">Tables exclues entièrement <i class="info-dot" :title="form.engine === 'mysql' ? 'Nom de table ou motif (logs, audit_*). Absente du dump.' : TIP_TABLES">i</i></span>
               <TagSelect v-model="form.excluded_tables" placeholder="Aucune table exclue" />
             </div>
             <div class="dump-row">
               <span class="k">Données de tables exclues <i class="info-dot" :title="TIP_DATA">i</i></span>
               <TagSelect v-model="form.excluded_table_data" placeholder="Aucune donnée de table exclue" />
             </div>
-            <div class="dump-row">
+            <div v-if="form.engine !== 'mysql'" class="dump-row">
               <span class="k">Ignorer les correspondances d'utilisateurs <i class="info-dot" :title="TIP_MAPPINGS">i</i></span>
               <span><input type="checkbox" v-model="form.ignore_user_mappings" /></span>
             </div>
           </div>
-          <label style="display:flex;align-items:center;gap:8px;margin-top:12px"><input type="checkbox" v-model="form.is_supabase" style="width:auto" /> Base Supabase (préparer rôles + extensions)</label>
+          <label v-if="form.engine !== 'mysql'" style="display:flex;align-items:center;gap:8px;margin-top:12px"><input type="checkbox" v-model="form.is_supabase" style="width:auto" /> Base Supabase (préparer rôles + extensions)</label>
+          <p v-else class="muted" style="margin-top:12px">Sauvegarde <code>mysqldump</code> (tables, routines, triggers). La vérification restaure dans un MySQL jetable.</p>
           <div style="margin-top:14px"><button class="btn" @click="createDb">Créer</button><button class="btn secondary" style="margin-left:8px" @click="showAdd=false">Annuler</button></div>
         </div>
       </div>
@@ -643,6 +1237,7 @@ onUnmounted(() => {
           <div class="tab" :class="{ active: tab==='config' }" @click="tab='config'">Configuration</div>
           <div class="tab" :class="{ active: tab==='backups' }" @click="tab='backups'">Sauvegardes</div>
           <div class="tab" :class="{ active: tab==='verifs' }" @click="tab='verifs'">Vérifications</div>
+          <div class="tab" :class="{ active: tab==='availability' }" @click="tab='availability'">Disponibilité</div>
           <div class="tab" :class="{ active: tab==='restores' }" @click="tab='restores'">Restaurations</div>
         </div>
 
@@ -661,6 +1256,15 @@ onUnmounted(() => {
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
                 </button>
               </h3>
+              <div class="field">
+                <span class="k">Groupe</span>
+                <span class="v">
+                  <select class="group-select" :value="selected.group_id ?? ''" @change="onGroupSelect">
+                    <option value="">Sans groupe</option>
+                    <option v-for="g in sortedGroups" :key="g.id" :value="g.id">{{ g.name }}</option>
+                  </select>
+                </span>
+              </div>
               <template v-if="editParams">
                 <div class="row">
                   <div><label>Hôte</label><input v-model="paramsForm.host" /></div>
@@ -675,7 +1279,7 @@ onUnmounted(() => {
                   <div style="max-width:160px"><label>Mode SSL</label><select v-model="paramsForm.ssl_mode"><option v-for="m in SSL_MODES" :key="m.value" :value="m.value">{{ m.label }}</option></select></div>
                 </div>
                 <div class="dump-filters">
-                  <div class="dump-row">
+                  <div v-if="selected.engine !== 'mysql'" class="dump-row">
                     <span class="k">Schémas inclus</span>
                     <TagSelect v-model="paramsForm.included_schemas" placeholder="Tous les schémas" />
                   </div>
@@ -687,7 +1291,7 @@ onUnmounted(() => {
                     <span class="k">Données de tables exclues <i class="info-dot" :title="TIP_DATA">i</i></span>
                     <TagSelect v-model="paramsForm.excluded_table_data" placeholder="Aucune donnée de table exclue" />
                   </div>
-                  <div class="dump-row">
+                  <div v-if="selected.engine !== 'mysql'" class="dump-row">
                     <span class="k">Ignorer les correspondances d'utilisateurs <i class="info-dot" :title="TIP_MAPPINGS">i</i></span>
                     <span><input type="checkbox" v-model="paramsForm.ignore_user_mappings" /></span>
                   </div>
@@ -695,16 +1299,16 @@ onUnmounted(() => {
                 <div style="margin-top:12px"><button class="btn" @click="saveParams">Enregistrer</button><button class="btn secondary" style="margin-left:8px" @click="editParams=false">Annuler</button></div>
               </template>
               <template v-else>
-                <div class="field"><span class="k">Version de PG</span><span class="v">{{ selected.pg_major ?? "—" }}</span></div>
+                <div class="field"><span class="k">{{ selected.engine === 'mysql' ? 'Version MySQL' : 'Version de PG' }}</span><span class="v">{{ selected.engine === 'mysql' ? (selected.server_version ?? '—') : (selected.pg_major ?? '—') }}</span></div>
                 <div class="field"><span class="k">Hôte</span><span class="v">{{ selected.host }}</span></div>
                 <div class="field"><span class="k">Port</span><span class="v">{{ selected.port }}</span></div>
                 <div class="field"><span class="k">Nom d'utilisateur</span><span class="v">{{ selected.username }}</span></div>
                 <div class="field"><span class="k">Mot de passe</span><span class="v">••••••••••••</span></div>
                 <div class="field"><span class="k">Nom de la base</span><span class="v">{{ selected.db_name }}</span></div>
                 <div class="field"><span class="k">Mode SSL</span><span class="v">{{ sslLabel(selected.ssl_mode) }}</span></div>
-                <div class="field"><span class="k">Type</span><span class="v">{{ selected.is_supabase ? "Supabase" : "PostgreSQL" }}</span></div>
+                <div class="field"><span class="k">Type</span><span class="v">{{ engineLabel(selected) }}</span></div>
                 <div class="dump-filters">
-                  <div class="dump-row">
+                  <div v-if="selected.engine !== 'mysql'" class="dump-row">
                     <span class="k">Schémas inclus</span>
                     <TagSelect :model-value="selected.included_schemas ?? []" readonly placeholder="Tous les schémas" />
                   </div>
@@ -716,7 +1320,7 @@ onUnmounted(() => {
                     <span class="k">Données de tables exclues <i class="info-dot" :title="TIP_DATA">i</i></span>
                     <TagSelect :model-value="selected.excluded_table_data ?? []" readonly placeholder="Aucune donnée de table exclue" />
                   </div>
-                  <div class="dump-row">
+                  <div v-if="selected.engine !== 'mysql'" class="dump-row">
                     <span class="k">Ignorer les correspondances d'utilisateurs <i class="info-dot" :title="TIP_MAPPINGS">i</i></span>
                     <span><input type="checkbox" :checked="selected.ignore_user_mappings === 1" disabled /></span>
                   </div>
@@ -815,14 +1419,43 @@ onUnmounted(() => {
                 </button>
               </h3>
               <template v-if="editVerif">
-                <label style="display:flex;gap:8px;align-items:center;margin-top:6px"><input type="checkbox" v-model="verifForm.is_supabase" style="width:auto" /> Préparée Supabase (rôles + extensions)</label>
+                <label v-if="selected.engine !== 'mysql'" style="display:flex;gap:8px;align-items:center;margin-top:6px"><input type="checkbox" v-model="verifForm.is_supabase" style="width:auto" /> Préparée Supabase (rôles + extensions)</label>
                 <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" v-model="verifForm.verify_after" style="width:auto" :disabled="!policy" /> Vérifier après chaque sauvegarde <span v-if="!policy" class="muted">(nécessite une planification)</span></label>
                 <div style="margin-top:12px"><button class="btn" @click="saveVerif">Enregistrer</button><button class="btn secondary" style="margin-left:8px" @click="editVerif=false">Annuler</button></div>
               </template>
               <template v-else>
-                <div class="field"><span class="k">Préparée Supabase</span><span class="v">{{ selected.is_supabase ? "Oui (rôles + extensions)" : "Standard" }}</span></div>
+                <div v-if="selected.engine !== 'mysql'" class="field"><span class="k">Préparée Supabase</span><span class="v">{{ selected.is_supabase ? "Oui (rôles + extensions)" : "Standard" }}</span></div>
+                <div v-else class="field"><span class="k">Moteur</span><span class="v">MySQL (mysqldump, conteneur jetable)</span></div>
                 <div class="field"><span class="k">Déclenchement</span><span class="v">{{ policy?.verify_after ? "Après chaque sauvegarde" : "Manuel" }}</span></div>
                 <div class="field"><span class="k">Cible</span><span class="v">Conteneur jetable (détruit ensuite)</span></div>
+              </template>
+            </div>
+
+            <!-- Vérification de disponibilité -->
+            <div class="config-section">
+              <h3>Vérification de disponibilité
+                <button class="icon-btn" style="width:26px;height:26px" title="Modifier" @click="openAvail">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                </button>
+              </h3>
+              <template v-if="editAvail">
+                <label style="display:flex;gap:8px;align-items:center;margin-top:2px"><input type="checkbox" v-model="availForm.enabled" style="width:auto" /> Vérification activée</label>
+                <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" v-model="availForm.notify" style="width:auto" /> Notifier en cas d'indisponibilité</label>
+                <p class="muted" style="margin:4px 0 0">Les canaux qui notifient les échecs sont utilisés.</p>
+                <label>Intervalle de vérification (min)</label>
+                <input v-model.number="availForm.interval_min" type="number" min="1" max="1440" />
+                <label>Tentatives avant indisponibilité</label>
+                <input v-model.number="availForm.attempts" type="number" min="1" max="30" />
+                <label>Conserver l'historique (jours)</label>
+                <input v-model.number="availForm.history_days" type="number" min="1" max="365" />
+                <div style="margin-top:12px"><button class="btn" @click="saveAvail">Enregistrer</button><button class="btn secondary" style="margin-left:8px" @click="editAvail=false">Annuler</button></div>
+              </template>
+              <template v-else>
+                <div class="field long"><span class="k">Vérification activée</span><span class="v">{{ ouiNon(selected.avail_enabled) }}</span></div>
+                <div class="field long"><span class="k">Notifier en cas d'indisponibilité</span><span class="v">{{ ouiNon(selected.avail_notify) }}</span></div>
+                <div class="field long"><span class="k">Intervalle de vérification (min)</span><span class="v">{{ selected.avail_interval_min ?? 1 }}</span></div>
+                <div class="field long"><span class="k">Tentatives avant indisponibilité</span><span class="v">{{ selected.avail_attempts ?? 3 }}</span></div>
+                <div class="field long"><span class="k">Conserver l'historique (jours)</span><span class="v">{{ selected.avail_history_days ?? 7 }}</span></div>
               </template>
             </div>
 
@@ -949,6 +1582,36 @@ onUnmounted(() => {
             </table>
           </div>
         </div>
+
+        <!-- ===== Disponibilité ===== -->
+        <div v-else-if="tab==='availability'">
+          <h2 class="avail-title">Vérifications de disponibilité</h2>
+          <div class="avail-toolbar">
+            <label>Période
+              <select v-model="availPeriod">
+                <option value="today">Aujourd'hui</option>
+                <option value="24h">24 heures</option>
+                <option value="7d">7 jours</option>
+              </select>
+            </label>
+            <button class="btn secondary" :disabled="availBusy" @click="checkNow">{{ availBusy ? "Vérification…" : "Vérifier maintenant" }}</button>
+          </div>
+          <p class="avail-status muted">
+            {{ availStatusLabel }}
+            <template v-if="selected.avail_last_check_at"> · {{ fmtAgo(selected.avail_last_check_at) }}</template>
+          </p>
+          <p v-if="lastAvailError && (selected.avail_down || selected.avail_fail_streak)" class="err">{{ lastAvailError }}</p>
+          <div v-if="availChecks.length" class="avail-grid">
+            <span
+              v-for="c in availChecks"
+              :key="c.id"
+              class="avail-cell"
+              :class="{ down: c.ok !== 1 }"
+              :title="cellTitle(c)"
+            ></span>
+          </div>
+          <p v-else class="muted">Aucune vérification sur cette période.</p>
+        </div>
         </div>
       </template>
     </section>
@@ -967,7 +1630,7 @@ onUnmounted(() => {
 
     <!-- ---------- Modale de restauration ---------- -->
     <div v-if="showRestore" class="modal-overlay" @click.self="showRestore=false">
-      <div class="modal">
+      <div class="modal restore-modal">
         <h2>Restaurer la sauvegarde #{{ restoreBackupId }}</h2>
         <div v-if="restoreSource" class="field" style="margin-top:8px">
           <span class="k">Base source</span>
@@ -982,8 +1645,9 @@ onUnmounted(() => {
         <template v-if="rform.mode==='existing'">
           <label>Base de destination</label>
           <select v-model="rform.targetDatabaseId" @change="onRestoreTarget">
-            <option v-for="d in dbs" :key="d.id" :value="d.id">{{ d.name }} — {{ d.db_name }}@{{ d.host }}</option>
+            <option v-for="d in restoreCandidates" :key="d.id" :value="d.id">{{ d.name }} — {{ d.db_name }}@{{ d.host }}</option>
           </select>
+          <template v-if="restoreSource?.engine !== 'mysql'">
           <label style="display:flex;gap:8px;align-items:flex-start;margin-top:10px">
             <input type="checkbox" v-model="rform.wipeData" style="width:auto;margin-top:2px" @change="onWipeData" />
             Base Supabase : supprimer l'applicatif, conserver Supabase
@@ -991,18 +1655,45 @@ onUnmounted(() => {
           <p v-if="rform.wipeData" class="muted" style="margin-top:6px">Les tables, vues et fonctions de <code>public</code> sont supprimées puis recréées depuis la sauvegarde. Les objets d'extension (PostGIS, etc.) restent. <code>auth</code>, <code>storage</code>, <code>realtime</code> et les autres schémas Supabase ne sont pas touchés. Un schéma applicatif comme <code>private</code> est supprimé puis rechargé.</p>
           <p v-else-if="rform.clean" class="muted" style="margin-top:6px"><code>--clean</code> supprime les objets avant de les recréer. Sur une base Supabase, le schéma <code>public</code> peut rester bloqué par les extensions.</p>
           <p v-else class="muted" style="margin-top:6px">La sauvegarde sera restaurée dans cette base <strong>existante</strong>. Les lignes déjà présentes restent.</p>
+          </template>
+          <p v-else class="muted" style="margin-top:6px">Le dump contient <code>DROP TABLE IF EXISTS</code> : les tables de la sauvegarde sont recréées. La base source n'est jamais modifiée.</p>
         </template>
         <template v-else>
-          <label>Serveur (connexion existante)</label>
-          <select v-model="rform.serverDatabaseId">
-            <option v-for="d in dbs" :key="d.id" :value="d.id">{{ d.name }} — {{ d.host }}:{{ d.port }}</option>
-          </select>
-          <label>Nom de la nouvelle base</label>
-          <input v-model="rform.newDbName" placeholder="ex: restore_test (a-z, 0-9, _)" />
-          <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" v-model="rform.prepareSupabase" style="width:auto" /> Préparer Supabase (rôles + extensions)</label>
+          <button type="button" class="clip-fill" @click="fillConnFromClipboard">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="2" width="8" height="4" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /></svg>
+            Remplir depuis le presse-papiers
+          </button>
+          <div class="conn-grid">
+            <label for="rconn-host">Hôte</label>
+            <input id="rconn-host" v-model="rconn.host" :placeholder="restoreSource?.engine === 'mysql' ? 'Hôte MySQL' : 'Hôte PostgreSQL'" autocomplete="off" />
+            <label for="rconn-port">Port</label>
+            <input id="rconn-port" v-model="rconn.port" :placeholder="restoreSource?.engine === 'mysql' ? '3306' : '5432'" inputmode="numeric" autocomplete="off" />
+            <label for="rconn-user">Nom d'utilisateur</label>
+            <input id="rconn-user" v-model="rconn.username" placeholder="Saisissez le nom d'utilisateur" autocomplete="off" />
+            <label for="rconn-pw">Mot de passe</label>
+            <div class="pw-wrap">
+              <input id="rconn-pw" v-model="rconn.password" :type="showConnPw ? 'text' : 'password'" placeholder="Saisissez le mot de passe" autocomplete="new-password" />
+              <button type="button" class="pw-eye" :title="showConnPw ? 'Masquer le mot de passe' : 'Afficher le mot de passe'" @click="showConnPw = !showConnPw">
+                <svg v-if="showConnPw" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l18 18" /><path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" /><path d="M9.9 5.1A10.8 10.8 0 0 1 12 5c7 0 11 7 11 7a18 18 0 0 1-3.2 4.2" /><path d="M6.1 6.1C3.5 7.9 2 12 2 12s4 7 10 7a10 10 0 0 0 4.1-.9" /></svg>
+                <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /></svg>
+              </button>
+            </div>
+            <label for="rconn-db">Nom de la base</label>
+            <input id="rconn-db" v-model="rconn.dbName" autocomplete="off" />
+            <label for="rconn-ssl">Mode SSL</label>
+            <select id="rconn-ssl" v-model="rconn.sslMode">
+              <option v-for="m in SSL_MODES" :key="m.value" :value="m.value">{{ m.label }}</option>
+            </select>
+          </div>
+          <p v-if="connErrorMsg" class="err">{{ connErrorMsg }}</p>
+          <p class="muted" style="margin-top:10px">Cette base est créée sur le serveur indiqué, puis la sauvegarde y est restaurée.</p>
+          <label v-if="restoreSource?.engine !== 'mysql'" style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" v-model="rform.prepareSupabase" style="width:auto" /> Préparer Supabase (rôles + extensions)</label>
         </template>
 
-        <label style="display:flex;gap:8px;align-items:center;margin-top:12px"><input type="checkbox" v-model="rform.clean" style="width:auto" @change="onClean" /> Écraser les objets existants (<code>--clean</code>)</label>
+        <label style="display:flex;gap:8px;align-items:center;margin-top:12px"><input type="checkbox" v-model="rform.clean" style="width:auto" @change="onClean" />
+          <template v-if="restoreSource?.engine === 'mysql'">Supprimer les tables de la cible avant import</template>
+          <template v-else>Écraser les objets existants (<code>--clean</code>)</template>
+        </label>
 
         <div style="background:var(--danger-soft);border:1px solid var(--danger);border-radius:10px;margin-top:14px;padding:12px">
           <label style="display:flex;gap:8px;align-items:flex-start;color:var(--danger);margin:0">

@@ -54,11 +54,11 @@ export function dataMount(readOnly = false): {
   return { volume: source, target: "/data", readOnly };
 }
 
-/** Pull d'une image ; renvoie false si l'image est introuvable/échoue. */
-export async function pullImage(
+/** Pull d'une image. `error` est renseigné si le pull échoue. */
+export async function pullImageResult(
   image: string,
   platform?: string,
-): Promise<boolean> {
+): Promise<{ ok: true } | { ok: false; error: string }> {
   const d = getDocker();
   try {
     await new Promise<void>((resolve, reject) => {
@@ -71,11 +71,20 @@ export async function pullImage(
       if (platform) d.pull(image, { platform }, cb);
       else d.pull(image, cb);
     });
-    return true;
+    return { ok: true };
   } catch (err) {
-    logger.warn({ image, platform, err: String(err) }, "pull d'image échoué");
-    return false;
+    const error = err instanceof Error ? err.message : String(err);
+    logger.warn({ image, platform, err: error }, "pull d'image échoué");
+    return { ok: false, error };
   }
+}
+
+/** Pull d'une image ; renvoie false si l'image est introuvable/échoue. */
+export async function pullImage(
+  image: string,
+  platform?: string,
+): Promise<boolean> {
+  return (await pullImageResult(image, platform)).ok;
 }
 
 export interface PickedImage {
@@ -320,4 +329,76 @@ export async function waitForPostgres(
     await new Promise((r) => setTimeout(r, 1500));
   }
   throw new Error("Le PostgreSQL jetable n'est pas devenu disponible à temps");
+}
+
+/**
+ * MySQL jetable pour la vérification de restauration.
+ * MYSQL_DATABASE crée verifydb pendant l'init de l'image officielle.
+ */
+export async function startDisposableMysql(opts: {
+  image: string;
+  name: string;
+  rootPassword: string;
+  binds?: Array<{ volume: string; target: string; readOnly?: boolean }>;
+  platform?: string;
+}): Promise<Docker.Container> {
+  const d = getDocker();
+  const binds = (opts.binds ?? []).map(
+    (b) => `${b.volume}:${b.target}${b.readOnly ? ":ro" : ""}`,
+  );
+  const createOpts: Docker.ContainerCreateOptions & { platform?: string } = {
+    Image: opts.image,
+    name: opts.name,
+    Env: [
+      `MYSQL_ROOT_PASSWORD=${opts.rootPassword}`,
+      `MARIADB_ROOT_PASSWORD=${opts.rootPassword}`,
+      "MYSQL_DATABASE=verifydb",
+      "MARIADB_DATABASE=verifydb",
+    ],
+    HostConfig: { Binds: binds, AutoRemove: false },
+    Tty: false,
+  };
+  if (opts.platform) createOpts.platform = opts.platform;
+  const container = await d.createContainer(createOpts);
+  await container.start();
+  return container;
+}
+
+/**
+ * Attend que le serveur définitif accepte le SQL.
+ * L'entrypoint démarre un serveur temporaire le temps de l'init : on exige
+ * deux lectures réussies de verifydb, espacées, avant d'importer.
+ */
+export async function waitForMysql(
+  container: Docker.Container,
+  rootPassword: string,
+  timeoutMs = 180000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let okStreak = 0;
+  while (Date.now() < deadline) {
+    const res = await execInContainer(
+      container,
+      [
+        "mysql",
+        "--protocol=TCP",
+        "-h",
+        "127.0.0.1",
+        "-uroot",
+        "-N",
+        "-B",
+        "-e",
+        "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='verifydb'",
+      ],
+      { MYSQL_PWD: rootPassword },
+    );
+    if (res.exitCode === 0 && res.stdout.includes("verifydb")) {
+      okStreak += 1;
+      if (okStreak >= 2) return;
+    } else {
+      okStreak = 0;
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  throw new Error("Le MySQL jetable n'est pas devenu disponible à temps");
 }

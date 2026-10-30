@@ -2,6 +2,9 @@ import { logger } from "../../lib/logger.js";
 import { backups, databases, policies, restores, verifications } from "../../models/repo.js";
 import { runBackup } from "../backup/backup.js";
 import { enforceRetention } from "../backup/retention.js";
+import { runMysqlBackup } from "../mysql/backup.js";
+import { runMysqlRestore } from "../mysql/restore.js";
+import { runMysqlVerification } from "../mysql/verify.js";
 import { runVerification } from "../verify/verify.js";
 import { runRestore, type RestoreOptions } from "../restore/restore.js";
 import { notifyEvent } from "../notify/notify.js";
@@ -27,7 +30,7 @@ function policyWantsNotify(
 /**
  * File d'exécution séquentielle en mémoire.
  *
- * Les tâches lourdes (pg_dump, restauration en conteneur) s'exécutent une à la
+ * Les tâches lourdes (pg_dump, mysqldump, restauration en conteneur) s'exécutent une à la
  * fois pour borner l'usage CPU/disque sur un petit hôte. Pour du parallélisme
  * multi-hôtes, ce sera le rôle de l'agent sortant (évolution ultérieure).
  */
@@ -78,7 +81,11 @@ export function requestBackup(req: BackupRequest): { backupId: number } {
         message: `Sauvegarde #${backup.id} (${req.trigger}) démarrée.`,
         level: "info",
       });
-      await runBackup(backup.id, { encrypt: req.encrypt ?? true });
+      if (databases.get(req.databaseId)?.engine === "mysql") {
+        await runMysqlBackup(backup.id, { encrypt: req.encrypt ?? true });
+      } else {
+        await runBackup(backup.id, { encrypt: req.encrypt ?? true });
+      }
     })
     .then(async () => {
       const b = backups.get(backup.id);
@@ -127,7 +134,8 @@ function enqueueVerification(backupId: number, databaseId: number, trigger: stri
   const label = dbLabel(databaseId);
   jobQueue
     .enqueue(`verify#${v.id}`, async () => {
-      await runVerification(v.id);
+      if (databases.get(databaseId)?.engine === "mysql") await runMysqlVerification(v.id);
+      else await runVerification(v.id);
       // runVerification ne lève pas : on notifie selon le statut final.
       const done = verifications.get(v.id);
       if (done?.status === "success") {
@@ -156,13 +164,20 @@ export function requestRestore(opts: RestoreOptions): { restoreId: number } {
   if (opts.mode === "existing" && opts.targetDatabaseId != null) {
     const td = databases.get(opts.targetDatabaseId);
     if (td) label = `${td.db_name}@${td.host}`;
+  } else if (opts.mode === "new" && opts.connection) {
+    label = `${opts.connection.dbName}@${opts.connection.host} (nouvelle)`;
   } else if (opts.mode === "new" && opts.serverDatabaseId != null) {
     const sd = databases.get(opts.serverDatabaseId);
     if (sd) label = `${opts.newDbName}@${sd.host} (nouvelle)`;
   }
   const rec = restores.create(opts.backupId, opts.mode, label);
   jobQueue
-    .enqueue(`restore#${rec.id}`, () => runRestore(rec.id, opts))
+    .enqueue(`restore#${rec.id}`, async () => {
+      const backup = backups.get(opts.backupId);
+      const source = backup ? databases.get(backup.database_id) : undefined;
+      if (source?.engine === "mysql") await runMysqlRestore(rec.id, opts);
+      else await runRestore(rec.id, opts);
+    })
     .catch(() => undefined);
   return { restoreId: rec.id };
 }

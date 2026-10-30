@@ -28,6 +28,15 @@ export interface RestoreOptions {
   /** mode=new : serveur (base enregistrée) où créer la nouvelle base. */
   serverDatabaseId?: number;
   newDbName?: string;
+  /** mode=new : connexion saisie (non enregistrée). Le mot de passe ne doit pas être journalisé. */
+  connection?: {
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+    dbName: string;
+    sslMode: string;
+  };
   /** --clean --if-exists (écrase les objets existants). DANGEREUX. */
   clean?: boolean;
   /**
@@ -40,7 +49,21 @@ export interface RestoreOptions {
   prepareSupabase?: boolean;
 }
 
-interface Conn { host: string; port: number; user: string; pw: string }
+interface Conn { host: string; port: number; user: string; pw: string; ssl?: string }
+
+const SSL_MODES = new Set(["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]);
+
+function pgEnv(conn: Conn, db: string): Record<string, string> {
+  const env: Record<string, string> = {
+    PGPASSWORD: conn.pw,
+    PGHOST: conn.host,
+    PGPORT: String(conn.port),
+    PGUSER: conn.user,
+    PGDATABASE: db,
+  };
+  if (conn.ssl && SSL_MODES.has(conn.ssl)) env.PGSSLMODE = conn.ssl;
+  return env;
+}
 
 function paths(relPath: string) {
   return {
@@ -50,18 +73,21 @@ function paths(relPath: string) {
 }
 
 function connOf(d: DatabaseSource): Conn {
-  return { host: d.host, port: d.port, user: d.username, pw: decryptString(d.password_enc) };
+  return {
+    host: d.host, port: d.port, user: d.username,
+    pw: decryptString(d.password_enc), ssl: d.ssl_mode || undefined,
+  };
 }
 
-/** psql sur une cible distante (heredoc, continue sur erreurs). */
+/** psql sur une cible distante (heredoc). Hôte et identifiants passent par l'environnement, pas le shell. */
 async function remotePsql(
   image: string, platform: string | undefined, conn: Conn, db: string, script: string,
   stopOnError = false,
 ) {
   return runEphemeral({
-    image, platform, entrypoint: "", env: { PGPASSWORD: conn.pw },
+    image, platform, entrypoint: "", env: pgEnv(conn, db),
     cmd: ["bash", "-lc",
-      `psql -h ${conn.host} -p ${conn.port} -U ${conn.user} -d ${db} -v ON_ERROR_STOP=${stopOnError ? "1" : "0"} -At <<'DSB_EOSQL'\n${script}\nDSB_EOSQL`],
+      `psql -v ON_ERROR_STOP=${stopOnError ? "1" : "0"} -At <<'DSB_EOSQL'\n${script}\nDSB_EOSQL`],
   });
 }
 
@@ -95,6 +121,14 @@ export async function runRestore(restoreId: number, opts: RestoreOptions): Promi
       if (!td) throw new Error("Base de destination introuvable");
       conn = connOf(td);
       targetDb = td.db_name;
+    } else if (opts.connection) {
+      const c = opts.connection;
+      if (!c.dbName || !/^[a-zA-Z0-9_]+$/.test(c.dbName)) {
+        throw new Error("Nom de nouvelle base invalide (a-z, 0-9, _)");
+      }
+      if (!c.host || !c.username) throw new Error("Connexion de destination incomplète");
+      conn = { host: c.host, port: c.port, user: c.username, pw: c.password, ssl: c.sslMode };
+      targetDb = c.dbName;
     } else {
       const sd = opts.serverDatabaseId ? databases.get(opts.serverDatabaseId) : undefined;
       if (!sd) throw new Error("Serveur de destination introuvable");
@@ -192,7 +226,7 @@ export async function runRestore(restoreId: number, opts: RestoreOptions): Promi
     const restoreRes = await runEphemeral({
       image, platform, entrypoint: "",
       env: {
-        PGPASSWORD: conn.pw,
+        ...pgEnv(conn, targetDb),
         ...(replica ? { PGOPTIONS: "-c session_replication_role=replica" } : {}),
       },
       binds: [dataMount(true)],
