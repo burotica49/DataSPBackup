@@ -104,7 +104,7 @@ onMounted(load);
       défaut. <code>{major}</code> est remplacé par la version si présent.
     </p>
     <div class="row" v-for="maj in ['14','15','16','17','18']" :key="maj" style="align-items: flex-end">
-      <div style="max-width: 90px">
+      <div class="w-pg">
         <label>PG {{ maj }}</label>
         <input :value="maj" disabled />
       </div>

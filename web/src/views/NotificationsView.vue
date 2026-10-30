@@ -193,7 +193,8 @@ onMounted(load);
     </div>
   </div>
 
-  <div class="card" style="margin-top: 16px">
+  <div class="card table-card" style="margin-top: 16px">
+    <div class="table-wrap">
     <table>
       <thead>
         <tr><th>Nom</th><th>Type</th><th>Lancement</th><th>Succès</th><th>Échec</th><th>Actif</th><th></th></tr>
@@ -220,6 +221,7 @@ onMounted(load);
         <tr v-if="!list.length"><td colspan="7" class="muted">Aucun canal configuré.</td></tr>
       </tbody>
     </table>
+    </div>
   </div>
   </div>
 </template>

@@ -69,6 +69,7 @@ onUnmounted(() => clearTimeout(timer));
 
     <div v-if="v.errors?.length" class="card">
       <h2>Erreurs catégorisées</h2>
+      <div class="table-wrap">
       <table>
         <thead><tr><th>Catégorie</th><th>Nb</th><th>Type</th><th>Diagnostic</th></tr></thead>
         <tbody>
@@ -80,12 +81,14 @@ onUnmounted(() => clearTimeout(timer));
           </tr>
         </tbody>
       </table>
+      </div>
     </div>
 
     <div v-if="v.report?.comparison" class="card">
       <h2>Comparaison avec la source</h2>
       <p v-if="v.report.comparison.withinTolerance" class="badge success">dans la tolérance</p>
-      <table v-if="v.report.comparison.diffs?.length" style="margin-top: 10px">
+      <div v-if="v.report.comparison.diffs?.length" class="table-wrap" style="margin-top: 10px">
+      <table>
         <thead><tr><th>Table</th><th>Source</th><th>Restauré</th></tr></thead>
         <tbody>
           <tr v-for="d in v.report.comparison.diffs" :key="d.table">
@@ -93,6 +96,7 @@ onUnmounted(() => clearTimeout(timer));
           </tr>
         </tbody>
       </table>
+      </div>
     </div>
 
     <div v-if="v.report?.timeline" class="card">
@@ -104,12 +108,14 @@ onUnmounted(() => clearTimeout(timer));
 
     <div v-if="Object.keys(v.row_counts || {}).length" class="card">
       <h2>Lignes par table (restauré)</h2>
+      <div class="table-wrap">
       <table>
         <thead><tr><th>Table</th><th>Lignes</th></tr></thead>
         <tbody>
           <tr v-for="(c, t) in v.row_counts" :key="t"><td><code>{{ t }}</code></td><td>{{ c }}</td></tr>
         </tbody>
       </table>
+      </div>
     </div>
   </div>
   <p v-else class="muted">Chargement…</p>

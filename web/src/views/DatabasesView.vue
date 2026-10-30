@@ -88,6 +88,7 @@ const stores = ref<Store[]>([]);
 const channels = ref<Channel[]>([]);
 const allBackups = ref<Backup[]>([]);
 const selectedId = ref<number | null>(queryDb(route.query.db) ?? storedPlace.db);
+const showMobileList = ref(queryDb(route.query.db) == null && queryValue(route.query.detail) === "");
 const tab = ref<Tab>(queryValue(route.query.tab) ? queryTab(route.query.tab) : storedPlace.tab);
 
 const backups = ref<Backup[]>([]);
@@ -297,6 +298,7 @@ function syncPlace() {
 }
 watch([selectedId, tab], syncPlace);
 watch(() => route.fullPath, () => { if (route.name === "databases") syncPlace(); });
+watch(() => route.query.detail, (d) => { if (queryValue(d)) showMobileList.value = false; });
 
 type DetailKind = "backup" | "verification" | "restore";
 const detail = computed(() => {
@@ -390,6 +392,7 @@ watch(selectedId, (id) => { if (id != null) { showAdd.value = false; resetEdits(
 
 function select(id: number) {
   selectedId.value = id;
+  showMobileList.value = false;
   tab.value = "config";
   const gid = dbs.value.find((d) => d.id === id)?.group_id;
   if (gid != null) ensureOpen(gid);
@@ -617,7 +620,8 @@ const blank = () => ({
   group_id: null as number | null,
 });
 const form = ref(blank());
-function openAdd() { showAdd.value = true; resetEdits(); form.value = blank(); selectedId.value = null; }
+function openAdd() { showAdd.value = true; resetEdits(); form.value = blank(); selectedId.value = null; showMobileList.value = false; }
+function backToList() { showAdd.value = false; showMobileList.value = true; }
 function onEngineChange() {
   if (form.value.engine === "mysql") {
     if (form.value.port === 5432) form.value.port = 3306;
@@ -1120,7 +1124,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="master-detail">
+  <div class="master-detail" :class="showMobileList ? 'mobile-list' : 'mobile-detail'">
     <!-- ---------- Liste des bases ---------- -->
     <aside class="list-panel">
       <div v-if="showNewGroup" class="new-group">
@@ -1247,6 +1251,10 @@ onUnmounted(() => {
 
     <!-- ---------- Détail ---------- -->
     <section class="detail-panel">
+      <button type="button" class="mobile-back" @click="backToList">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m15 6-6 6 6 6" /></svg>
+        Bases
+      </button>
       <!-- Formulaire ajout -->
       <div v-if="showAdd">
         <h1>{{ form.engine === 'mysql' ? 'Nouvelle base MySQL' : 'Nouvelle base PostgreSQL / Supabase' }}</h1>
@@ -1263,7 +1271,7 @@ onUnmounted(() => {
           <div class="row">
             <div><label>Nom</label><input v-model="form.name" /></div>
             <div><label>Hôte</label><input v-model="form.host" :placeholder="form.engine === 'mysql' ? 'mysql.exemple.com' : 'db.xxx.supabase.co / pooler'" /></div>
-            <div style="max-width:110px"><label>Port</label><input v-model="form.port" type="number" /></div>
+            <div class="w-port"><label>Port</label><input v-model="form.port" type="number" /></div>
           </div>
           <div v-if="groups.length" class="row">
             <div>
@@ -1280,7 +1288,7 @@ onUnmounted(() => {
             <div><label>Mot de passe</label><input v-model="form.password" type="password" /></div>
           </div>
           <div class="row">
-            <div style="max-width:160px"><label>Mode SSL</label><select v-model="form.ssl_mode"><option v-for="m in SSL_MODES" :key="m.value" :value="m.value">{{ m.label }}</option></select></div>
+            <div class="w-ssl"><label>Mode SSL</label><select v-model="form.ssl_mode"><option v-for="m in SSL_MODES" :key="m.value" :value="m.value">{{ m.label }}</option></select></div>
           </div>
           <div class="dump-filters">
             <div v-if="form.engine !== 'mysql'" class="dump-row">
@@ -1302,21 +1310,21 @@ onUnmounted(() => {
           </div>
           <label v-if="form.engine !== 'mysql'" style="display:flex;align-items:center;gap:8px;margin-top:12px"><input type="checkbox" v-model="form.is_supabase" style="width:auto" /> Base Supabase (préparer rôles + extensions)</label>
           <p v-else class="muted" style="margin-top:12px">Sauvegarde <code>mysqldump</code> (tables, routines, triggers). La vérification restaure dans un MySQL jetable.</p>
-          <div style="margin-top:14px"><button class="btn" @click="createDb">Créer</button><button class="btn secondary" style="margin-left:8px" @click="showAdd=false">Annuler</button></div>
+          <div style="margin-top:14px"><button class="btn" @click="createDb">Créer</button><button class="btn secondary" style="margin-left:8px" @click="backToList">Annuler</button></div>
         </div>
       </div>
 
       <div v-else-if="!selected" class="muted">Aucune base sélectionnée. Ajoutez-en une.</div>
 
       <template v-else>
-        <h1 style="display:flex;align-items:center;gap:10px">
+        <h1 class="detail-heading">
           <template v-if="editName">
-            <input v-model="nameEdit" style="max-width:340px;font-size:20px;font-weight:700" @keyup.enter="saveName" />
+            <input v-model="nameEdit" class="detail-name-input" @keyup.enter="saveName" />
             <button class="btn" @click="saveName">Enregistrer</button>
             <button class="btn secondary" @click="editName=false">Annuler</button>
           </template>
           <template v-else>
-            {{ selected.name }}
+            <span class="detail-name">{{ selected.name }}</span>
             <button class="icon-btn" title="Renommer" @click="openRename">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
             </button>
@@ -1358,7 +1366,7 @@ onUnmounted(() => {
               <template v-if="editParams">
                 <div class="row">
                   <div><label>Hôte</label><input v-model="paramsForm.host" /></div>
-                  <div style="max-width:110px"><label>Port</label><input v-model="paramsForm.port" type="number" /></div>
+                  <div class="w-port"><label>Port</label><input v-model="paramsForm.port" type="number" /></div>
                 </div>
                 <div class="row">
                   <div><label>Base</label><input v-model="paramsForm.db_name" /></div>
@@ -1366,7 +1374,7 @@ onUnmounted(() => {
                 </div>
                 <div class="row">
                   <div><label>Mot de passe <span class="muted">(vide = inchangé)</span></label><input v-model="paramsForm.password" type="password" /></div>
-                  <div style="max-width:160px"><label>Mode SSL</label><select v-model="paramsForm.ssl_mode"><option v-for="m in SSL_MODES" :key="m.value" :value="m.value">{{ m.label }}</option></select></div>
+                  <div class="w-ssl"><label>Mode SSL</label><select v-model="paramsForm.ssl_mode"><option v-for="m in SSL_MODES" :key="m.value" :value="m.value">{{ m.label }}</option></select></div>
                 </div>
                 <div class="dump-filters">
                   <div v-if="selected.engine !== 'mysql'" class="dump-row">
@@ -1792,7 +1800,7 @@ onUnmounted(() => {
           </label>
         </div>
 
-        <div style="margin-top:16px;display:flex;gap:8px">
+        <div class="modal-actions">
           <button class="btn danger" :disabled="!rform.confirm" @click="launchRestore">Lancer la restauration</button>
           <button class="btn secondary" @click="showRestore=false">Annuler</button>
         </div>
@@ -1804,7 +1812,7 @@ onUnmounted(() => {
       <div class="modal" style="width:400px">
         <h2>Confirmation</h2>
         <p>{{ confirmState.message }}</p>
-        <div style="margin-top:16px;display:flex;gap:8px">
+        <div class="modal-actions">
           <button class="btn danger" @click="doConfirm">Supprimer</button>
           <button class="btn secondary" @click="confirmState.show=false">Annuler</button>
         </div>

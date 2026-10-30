@@ -168,7 +168,8 @@ onMounted(load);
     </div>
   </div>
 
-  <div class="card" style="margin-top: 16px">
+  <div class="card table-card" style="margin-top: 16px">
+    <div class="table-wrap">
     <table>
       <thead>
         <tr><th>Base</th><th>Cron (UTC)</th><th>Rétention</th><th>Vérif</th><th>Active</th><th></th></tr>
@@ -198,6 +199,7 @@ onMounted(load);
         <tr v-if="!list.length"><td colspan="6" class="muted">Aucune planification.</td></tr>
       </tbody>
     </table>
+    </div>
   </div>
   </div>
 </template>

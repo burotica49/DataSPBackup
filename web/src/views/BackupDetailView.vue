@@ -127,7 +127,7 @@ onUnmounted(() => clearTimeout(timer));
     <div class="modal" style="width:400px">
       <h2>Confirmation</h2>
       <p>Supprimer cette sauvegarde et ses vérifications ?</p>
-      <div style="margin-top:16px;display:flex;gap:8px">
+      <div class="modal-actions">
         <button class="btn danger" @click="confirmDel">Supprimer</button>
         <button class="btn secondary" @click="showDelConfirm=false">Annuler</button>
       </div>

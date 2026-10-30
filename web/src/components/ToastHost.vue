@@ -42,6 +42,14 @@ const toasts = useToasts();
   gap: 10px;
   max-width: min(380px, calc(100vw - 36px));
 }
+@media (max-width: 960px) {
+  .toast-host {
+    top: calc(68px + env(safe-area-inset-top, 0px));
+    left: 12px;
+    right: 12px;
+    max-width: none;
+  }
+}
 .toast {
   display: flex;
   align-items: flex-start;

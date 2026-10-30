@@ -3,7 +3,8 @@ import { ref } from "vue";
 import { useRouter } from "vue-router";
 import { useAuth } from "../store/auth";
 import type { ApiError } from "../lib/api";
-import { version } from "../../package.json";
+import AppLogo from "../components/AppLogo.vue";
+import { version } from "../../../package.json";
 
 const auth = useAuth();
 const router = useRouter();
@@ -29,7 +30,10 @@ async function submit() {
 <template>
   <div class="center-screen">
     <form class="card login-box" @submit.prevent="submit">
-      <div class="brand">DataSP<span>Backup</span><small class="ver">v{{ version }}</small></div>
+      <div class="brand-lockup">
+        <AppLogo />
+        <div class="brand">DataSP<span>Backup</span><small class="ver">v{{ version }}</small></div>
+      </div>
       <!-- <p class="muted">Sauvegarde PostgreSQL + vérification Supabase</p> -->
       <label>Email</label>
       <input v-model="email" type="email" autocomplete="username" />
