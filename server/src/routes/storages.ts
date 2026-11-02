@@ -7,7 +7,7 @@ import { requireAuth } from "../lib/auth.js";
 const createSchema = z.object({
   name: z.string().min(1),
   type: z.enum(["local", "s3"]),
-  config: z.record(z.any()).default({}),
+  config: z.record(z.string(), z.any()).default({}),
 });
 
 export async function storageRoutes(app: FastifyInstance): Promise<void> {

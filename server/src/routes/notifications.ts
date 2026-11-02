@@ -9,7 +9,7 @@ import { requireAuth } from "../lib/auth.js";
 const createSchema = z.object({
   type: z.enum(["telegram", "email", "webhook"]),
   name: z.string().min(1),
-  config: z.record(z.any()).default({}),
+  config: z.record(z.string(), z.any()).default({}),
   on_start: z.boolean().default(false),
   on_success: z.boolean().default(false),
   on_failure: z.boolean().default(true),
@@ -18,7 +18,7 @@ const createSchema = z.object({
 
 const updateSchema = z.object({
   name: z.string().min(1).optional(),
-  config: z.record(z.any()).optional(),
+  config: z.record(z.string(), z.any()).optional(),
   on_start: z.boolean().optional(),
   on_success: z.boolean().optional(),
   on_failure: z.boolean().optional(),

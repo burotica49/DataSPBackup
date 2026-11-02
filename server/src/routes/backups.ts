@@ -14,7 +14,7 @@ const noBreak = (s: string) => !/[\r\n\0]/.test(s);
 const connectionSchema = z.object({
   host: z.string().trim().min(1, "Hôte requis").max(253)
     .regex(/^[A-Za-z0-9:._-]+$/, "Hôte invalide"),
-  port: z.number({ invalid_type_error: "Port invalide" }).int().min(1).max(65535),
+  port: z.number({ error: "Port invalide" }).int().min(1).max(65535),
   username: z.string().trim().min(1, "Utilisateur requis").max(128)
     .regex(/^[A-Za-z0-9._-]+$/, "Utilisateur invalide"),
   password: z.string().max(1024).refine(noBreak, "Mot de passe invalide"),
@@ -116,7 +116,7 @@ export async function backupRoutes(app: FastifyInstance): Promise<void> {
     }
     const parsed = restoreSchema.safeParse(req.body);
     if (!parsed.success) {
-      const message = parsed.error.issues.find((i) => i.message && !/^(Invalid|Expected|Required)/.test(i.message))?.message
+      const message = parsed.error.issues.find((i) => i.message && !/^(Invalid|Expected|Required|Too (small|big))/.test(i.message))?.message
         ?? "Paramètres de restauration invalides";
       return reply.code(400).send({ error: message });
     }
