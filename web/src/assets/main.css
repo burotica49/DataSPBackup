@@ -61,6 +61,7 @@ h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--muted); te
 .topbar .spacer { flex: 1; }
 .topbar .top-link { color: var(--muted); font-size: 13px; }
 .topbar .user { color: var(--muted); font-size: 13px; }
+.topbar .top-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 
 .body { flex: 1; display: flex; min-height: 0; }
 
