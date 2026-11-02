@@ -15,7 +15,7 @@
 
 DataSPBackup planifie des sauvegardes chiffrées, **prouve qu'elles sont restaurables** (restauration dans un conteneur jetable, comparaison des lignes avec la source, rapport détaillé) et sait les restaurer vers une base existante ou une nouvelle base. Il a été pensé pour les bases **Supabase**, qu'un PostgreSQL vierge ne sait pas restaurer.
 
-> Licence [Apache-2.0](LICENSE). Projet écrit à partir d'un cahier des charges, sans reprise de code de Databasus / Databasement / Portabase.
+> Licence [Apache-2.0](LICENSE) · © 2026 Burotica. Projet écrit à partir d'un cahier des charges, sans reprise de code de Databasus / Databasement / Portabase.
 
 **Sommaire** : [Fonctionnalités](#fonctionnalités) · [Aperçu](#aperçu) · [Pourquoi une vérification pour Supabase](#pourquoi-une-vérification-pour-supabase) · [Déploiement](#déploiement-docker) · [Premiers pas](#premiers-pas) · [Fonctionnement d'une vérification](#fonctionnement-dune-vérification) · [Sécurité](#sécurité) · [Architecture](#architecture) · [Développement](#développement) · [État et limites](#état-et-limites)
 

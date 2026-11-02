@@ -1,0 +1,18 @@
+DataSPBackup
+Copyright 2026 Burotica
+
+Ce produit a été développé par Burotica (https://github.com/burotica49/dataspbackup).
+Il est distribué sous licence Apache 2.0 : voir le fichier LICENSE.
+
+Éléments tiers présents dans le code source
+-------------------------------------------
+
+- Certaines icônes SVG de l'interface proviennent de Lucide (https://lucide.dev),
+  distribué sous licence ISC, et d'Octicons (https://primer.style/octicons),
+  distribué sous licence MIT, Copyright (c) GitHub, Inc.
+  Le logo GitHub reste une marque de GitHub, Inc.
+
+Les dépendances logicielles (npm) ne sont pas incluses dans ce dépôt : elles sont
+installées à la construction et conservent leurs licences respectives, toutes
+compatibles avec la licence Apache 2.0 (MIT, BSD, ISC, Apache-2.0, BlueOak,
+MIT-0, Unlicense).

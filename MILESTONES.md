@@ -35,7 +35,7 @@ Critères d'acceptation :
 - Sauvegarde physique / WAL (PITR).
 - Autres moteurs : MySQL, MariaDB, MongoDB.
 
-## Décisions prises (§7 du contexte)
+## Décisions prises
 
 - Stack : **Node (TS) + Vue 3**.
 - Vérification : **intégrée** au serveur (socket Docker), agent sortant = J4.
