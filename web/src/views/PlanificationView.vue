@@ -12,10 +12,20 @@ interface Policy {
 }
 interface Db { id: number; name: string }
 interface Store { id: number; name: string; type: string }
+interface Backup {
+  id: number; policy_id: number | null; status: string;
+  error: string | null; created_at: string; finished_at: string | null;
+}
+interface Verif {
+  id: number; backup_id: number; status: string;
+  root_error: string | null; created_at: string;
+}
 
 const list = ref<Policy[]>([]);
 const dbs = ref<Db[]>([]);
 const stores = ref<Store[]>([]);
+const backups = ref<Backup[]>([]);
+const verifs = ref<Verif[]>([]);
 const showForm = ref(false);
 const editingId = ref<number | null>(null);
 
@@ -38,6 +48,24 @@ const presetValue = computed(() =>
 
 function dbName(id: number) { return dbs.value.find((d) => d.id === id)?.name ?? "#" + id; }
 
+function parse(d: string | null) { if (!d) return NaN; return Date.parse(/[TZ]/.test(d) ? d : d + "Z"); }
+function fmtAgo(d: string | null): string {
+  const t = parse(d); if (isNaN(t)) return "";
+  const s = Math.floor((Date.now() - t) / 1000);
+  if (s < 60) return "il y a quelques secondes";
+  const m = Math.floor(s / 60); if (m < 60) return `il y a ${m} min`;
+  const h = Math.floor(m / 60); if (h < 24) return `il y a ${h} h`;
+  return `il y a ${Math.floor(h / 24)} j`;
+}
+function statusLabel(s: string): string {
+  return s === "success" ? "Réussie" : s === "failed" ? "Échouée" : s === "running" ? "En cours" : s === "pending" ? "En attente" : s === "canceled" ? "Annulée" : s;
+}
+function lastRun(policyId: number): { backup?: Backup; verif?: Verif } {
+  const backup = backups.value.find((b) => b.policy_id === policyId);
+  const verif = backup ? verifs.value.find((v) => v.backup_id === backup.id) : undefined;
+  return { backup, verif };
+}
+
 function payload() {
   return {
     storage_id: Number(form.value.storage_id),
@@ -51,10 +79,12 @@ function payload() {
 }
 
 async function load() {
-  [list.value, dbs.value, stores.value] = await Promise.all([
+  [list.value, dbs.value, stores.value, backups.value, verifs.value] = await Promise.all([
     api.get<Policy[]>("/api/policies"),
     api.get<Db[]>("/api/databases"),
     api.get<Store[]>("/api/storages"),
+    api.get<Backup[]>("/api/backups"),
+    api.get<Verif[]>("/api/verifications"),
   ]);
 }
 function openCreate() {
@@ -108,6 +138,7 @@ async function toggle(p: Policy) {
 async function runNow(p: Policy) {
   await api.post(`/api/policies/${p.id}/run`);
   toasts.info(`Sauvegarde lancée — ${dbName(p.database_id)}`, { to: `/?db=${p.database_id}&tab=backups`, label: "Voir" });
+  await load();
 }
 async function remove(id: number) {
   if (!confirm("Supprimer cette planification ?")) return;
@@ -172,7 +203,7 @@ onMounted(load);
     <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Base</th><th>Cron (UTC)</th><th>Rétention</th><th>Vérif</th><th>Active</th><th></th></tr>
+        <tr><th>Base</th><th>Cron (UTC)</th><th>Rétention</th><th>Vérif</th><th>Dernier état</th><th>Active</th><th></th></tr>
       </thead>
       <tbody>
         <tr v-for="p in list" :key="p.id">
@@ -185,6 +216,18 @@ onMounted(load);
             {{ !p.retention_count && !p.retention_days ? "illimitée" : "" }}
           </td>
           <td>{{ p.verify_after ? "oui" : "non" }}</td>
+          <td>
+            <div v-if="lastRun(p.id).backup" class="status-cell">
+              <span class="badge" :class="lastRun(p.id).backup!.status" :title="lastRun(p.id).backup!.error || undefined">
+                Sauvegarde {{ statusLabel(lastRun(p.id).backup!.status) }}
+              </span>
+              <span v-if="lastRun(p.id).verif" class="badge" :class="lastRun(p.id).verif!.status" :title="lastRun(p.id).verif!.root_error || undefined">
+                Vérification {{ statusLabel(lastRun(p.id).verif!.status) }}
+              </span>
+              <span class="muted">{{ fmtAgo(lastRun(p.id).backup!.finished_at || lastRun(p.id).backup!.created_at) }}</span>
+            </div>
+            <span v-else class="muted">Jamais exécutée</span>
+          </td>
           <td><input type="checkbox" :checked="p.enabled === 1" @change="toggle(p)" /></td>
           <td style="white-space: nowrap">
             <div style="display: flex; align-items: stretch; gap: 6px">
@@ -196,7 +239,7 @@ onMounted(load);
             </div>
           </td>
         </tr>
-        <tr v-if="!list.length"><td colspan="6" class="muted">Aucune planification.</td></tr>
+        <tr v-if="!list.length"><td colspan="7" class="muted">Aucune planification.</td></tr>
       </tbody>
     </table>
     </div>

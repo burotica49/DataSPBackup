@@ -66,8 +66,9 @@ interface Backup {
   started_at: string | null; finished_at: string | null; encrypted: number; error: string | null;
 }
 interface Verif {
-  id: number; backup_id: number; status: string; trigger: string;
+  id: number; backup_id: number; database_id: number; status: string; trigger: string;
   created_at: string; started_at: string | null; finished_at: string | null;
+  root_error: string | null;
 }
 interface Restore {
   id: number; backup_id: number; mode: string; target_label: string; status: string;
@@ -87,6 +88,7 @@ const groups = ref<Group[]>([]);
 const stores = ref<Store[]>([]);
 const channels = ref<Channel[]>([]);
 const allBackups = ref<Backup[]>([]);
+const allVerifs = ref<Verif[]>([]);
 const selectedId = ref<number | null>(queryDb(route.query.db) ?? storedPlace.db);
 const showMobileList = ref(queryDb(route.query.db) == null && queryValue(route.query.detail) === "");
 const tab = ref<Tab>(queryValue(route.query.tab) ? queryTab(route.query.tab) : storedPlace.tab);
@@ -112,14 +114,38 @@ function engineLabel(d: { engine?: string; is_supabase: number }): string {
 }
 function ouiNon(n: number | undefined): string { return n ? "Oui" : "Non"; }
 function dbBadge(d: Db): { cls: string; label: string } {
-  if (d.avail_enabled) {
-    if (!d.avail_last_check_at) return { cls: "neutral", label: "Surveillance" };
-    if (d.avail_down) return { cls: "failed", label: "Indisponible" };
-    if (d.avail_fail_streak > 0) return { cls: "warn", label: "Échec" };
-    return { cls: "available", label: "Disponible" };
+  if (!d.avail_enabled) return { cls: "neutral", label: "Non suivi" };
+  if (!d.avail_last_check_at) return { cls: "neutral", label: "En attente" };
+  if (d.avail_down) return { cls: "failed", label: "Indisponible" };
+  if (d.avail_fail_streak > 0) return { cls: "warn", label: "Échec" };
+  return { cls: "available", label: "Disponible" };
+}
+function availTitle(d: Db): string {
+  if (!d.avail_enabled) return "Suivi de disponibilité inactif";
+  if (!d.avail_last_check_at) return "Aucune vérification de disponibilité pour l'instant";
+  if (d.avail_down) return "La base ne répond pas";
+  if (d.avail_fail_streak > 0) return `Échec de connexion ${d.avail_fail_streak}/${d.avail_attempts || 3}`;
+  return `Disponible — dernier contrôle ${fmtAgo(d.avail_last_check_at)}`;
+}
+function jobAlerts(dbId: number): { key: string; label: string; title: string }[] {
+  const out: { key: string; label: string; title: string }[] = [];
+  const backup = allBackups.value.find((b) => b.database_id === dbId);
+  if (backup?.status === "failed") {
+    out.push({
+      key: "backup",
+      label: "Sauvegarde échouée",
+      title: backup.error?.trim() || "La dernière sauvegarde a échoué",
+    });
   }
-  if (d.pg_major || d.server_version) return { cls: "available", label: "Disponible" };
-  return { cls: "neutral", label: "Non testé" };
+  const verif = allVerifs.value.find((v) => v.database_id === dbId);
+  if (verif?.status === "failed") {
+    out.push({
+      key: "verif",
+      label: "Vérification échouée",
+      title: verif.root_error?.trim() || "La dernière vérification a échoué",
+    });
+  }
+  return out;
 }
 
 // ---- helpers ----
@@ -258,12 +284,13 @@ function canDropOn(groupId: number | null): boolean {
 
 // ---- loading ----
 async function loadAll() {
-  [dbs.value, groups.value, stores.value, channels.value, allBackups.value] = await Promise.all([
+  [dbs.value, groups.value, stores.value, channels.value, allBackups.value, allVerifs.value] = await Promise.all([
     api.get<Db[]>("/api/databases"),
     api.get<Group[]>("/api/groups"),
     api.get<Store[]>("/api/storages"),
     api.get<Channel[]>("/api/notifications"),
     api.get<Backup[]>("/api/backups"),
+    api.get<Verif[]>("/api/verifications"),
   ]);
   syncFolders(groups.value);
   const known = (id: number | null) => id != null && dbs.value.some((d) => d.id === id);
@@ -343,6 +370,8 @@ function applyDetail(id: number, bs: Backup[], vs: Verif[], ps: Policy[], rs: Re
   restores.value = rs.filter((r) => ids.has(r.backup_id));
   const others = allBackups.value.filter((b) => b.database_id !== id);
   allBackups.value = [...bs, ...others].sort((a, b) => parse(b.created_at) - parse(a.created_at));
+  const otherVerifs = allVerifs.value.filter((v) => v.database_id !== id);
+  allVerifs.value = [...vs, ...otherVerifs].sort((a, b) => parse(b.created_at) - parse(a.created_at));
 }
 
 const ACTIVE = new Set(["pending", "running"]);
@@ -1202,8 +1231,9 @@ onUnmounted(() => {
           >
             <div class="db-name">
               {{ d.name }}
+              <span class="badge" :class="dbBadge(d).cls" :title="availTitle(d)">{{ dbBadge(d).label }}</span>
+              <span v-for="a in jobAlerts(d.id)" :key="a.key" class="badge failed" :title="a.title">{{ a.label }}</span>
               <span v-if="!d.has_password" class="badge warn">Mot de passe requis</span>
-              <span v-else class="badge" :class="dbBadge(d).cls">{{ dbBadge(d).label }}</span>
             </div>
             <div class="db-meta">
               {{ engineLabel(d) }}<br />
@@ -1234,8 +1264,9 @@ onUnmounted(() => {
         >
           <div class="db-name">
             {{ d.name }}
+            <span class="badge" :class="dbBadge(d).cls" :title="availTitle(d)">{{ dbBadge(d).label }}</span>
+            <span v-for="a in jobAlerts(d.id)" :key="a.key" class="badge failed" :title="a.title">{{ a.label }}</span>
             <span v-if="!d.has_password" class="badge warn">Mot de passe requis</span>
-            <span v-else class="badge" :class="dbBadge(d).cls">{{ dbBadge(d).label }}</span>
           </div>
           <div class="db-meta">
             {{ engineLabel(d) }}<br />
