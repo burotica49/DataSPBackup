@@ -127,22 +127,36 @@ function availTitle(d: Db): string {
   if (d.avail_fail_streak > 0) return `Échec de connexion ${d.avail_fail_streak}/${d.avail_attempts || 3}`;
   return `Disponible — dernier contrôle ${fmtAgo(d.avail_last_check_at)}`;
 }
-function jobAlerts(dbId: number): { key: string; label: string; title: string }[] {
-  const out: { key: string; label: string; title: string }[] = [];
+function jobState(kind: "Sauvegarde" | "Vérification", status: string): { cls: string; label: string } {
+  if (status === "success") return { cls: "success", label: `${kind} réussie` };
+  if (status === "failed") return { cls: "failed", label: `${kind} échouée` };
+  if (status === "running") return { cls: "running", label: `${kind} en cours` };
+  if (status === "pending") return { cls: "pending", label: `${kind} en attente` };
+  if (status === "canceled") return { cls: "neutral", label: `${kind} annulée` };
+  return { cls: "neutral", label: `${kind} ${status}` };
+}
+function jobStates(dbId: number): { key: string; cls: string; label: string; title: string }[] {
+  const out: { key: string; cls: string; label: string; title: string }[] = [];
   const backup = allBackups.value.find((b) => b.database_id === dbId);
-  if (backup?.status === "failed") {
+  if (backup) {
+    const state = jobState("Sauvegarde", backup.status);
+    const when = fmtAgo(backup.finished_at || backup.created_at);
+    const err = backup.status === "failed" ? backup.error?.trim() : "";
     out.push({
       key: "backup",
-      label: "Sauvegarde échouée",
-      title: backup.error?.trim() || "La dernière sauvegarde a échoué",
+      ...state,
+      title: [err, when !== "—" ? when : ""].filter(Boolean).join(" — "),
     });
   }
   const verif = allVerifs.value.find((v) => v.database_id === dbId);
-  if (verif?.status === "failed") {
+  if (verif) {
+    const state = jobState("Vérification", verif.status);
+    const when = fmtAgo(verif.finished_at || verif.created_at);
+    const err = verif.status === "failed" ? verif.root_error?.trim() : "";
     out.push({
       key: "verif",
-      label: "Vérification échouée",
-      title: verif.root_error?.trim() || "La dernière vérification a échoué",
+      ...state,
+      title: [err, when !== "—" ? when : ""].filter(Boolean).join(" — "),
     });
   }
   return out;
@@ -254,10 +268,63 @@ const sortedGroups = computed(() =>
     (a, b) => (a.position - b.position) || a.name.localeCompare(b.name, "fr", { sensitivity: "base" }),
   ),
 );
-function dbsInGroup(id: number): Db[] {
-  return dbs.value.filter((d) => d.group_id === id);
+const FILTERS = [
+  { id: "all", label: "Tout" },
+  { id: "errors", label: "Erreurs" },
+  { id: "ok", label: "Réussies" },
+  { id: "down", label: "Indisponibles" },
+  { id: "none", label: "Sans sauvegarde" },
+] as const;
+type ListFilter = (typeof FILTERS)[number]["id"];
+const FILTER_KEY = "dataspbackup.dbfilter";
+function readFilter(): ListFilter {
+  try {
+    const v = sessionStorage.getItem(FILTER_KEY);
+    if (FILTERS.some((f) => f.id === v)) return v as ListFilter;
+  } catch { /* sessionStorage indisponible */ }
+  return "all";
 }
-const ungrouped = computed(() => dbs.value.filter((d) => d.group_id == null));
+const listFilter = ref<ListFilter>(readFilter());
+watch(listFilter, (v) => {
+  try { sessionStorage.setItem(FILTER_KEY, v); } catch { /* ignore */ }
+  if (v === "all") return;
+  for (const g of groups.value) {
+    if (dbs.value.some((d) => d.group_id === g.id && matchesFilter(d, v))) ensureOpen(g.id);
+  }
+});
+function latestOf<T extends { database_id: number }>(rows: T[], dbId: number): T | undefined {
+  return rows.find((row) => row.database_id === dbId);
+}
+function isDown(d: Db): boolean {
+  return d.avail_enabled === 1 && (d.avail_down === 1 || d.avail_fail_streak > 0);
+}
+function hasError(d: Db): boolean {
+  if (!d.has_password) return true;
+  if (isDown(d)) return true;
+  if (latestOf(allBackups.value, d.id)?.status === "failed") return true;
+  if (latestOf(allVerifs.value, d.id)?.status === "failed") return true;
+  return false;
+}
+function isOk(d: Db): boolean {
+  if (!d.has_password || isDown(d)) return false;
+  return latestOf(allBackups.value, d.id)?.status === "success"
+    && latestOf(allVerifs.value, d.id)?.status === "success";
+}
+function matchesFilter(d: Db, id: ListFilter = listFilter.value): boolean {
+  if (id === "errors") return hasError(d);
+  if (id === "ok") return isOk(d);
+  if (id === "down") return isDown(d);
+  if (id === "none") return !latestOf(allBackups.value, d.id);
+  return true;
+}
+function filterCount(id: ListFilter): number {
+  return dbs.value.filter((d) => matchesFilter(d, id)).length;
+}
+function dbsInGroup(id: number): Db[] {
+  return dbs.value.filter((d) => d.group_id === id && matchesFilter(d));
+}
+const ungrouped = computed(() => dbs.value.filter((d) => d.group_id == null && matchesFilter(d)));
+const filterIsEmpty = computed(() => listFilter.value !== "all" && filterCount(listFilter.value) === 0);
 
 const showNewGroup = ref(false);
 const groupName = ref("");
@@ -1169,8 +1236,13 @@ onUnmounted(() => {
       </div>
       <button v-else class="btn secondary list-top-action" @click="openNewGroup">Nouveau groupe</button>
 
+      <select v-model="listFilter" class="list-filter" aria-label="Affichage des bases">
+        <option v-for="f in FILTERS" :key="f.id" :value="f.id">{{ f.label }} ({{ filterCount(f.id) }})</option>
+      </select>
+
       <div
         v-for="(g, index) in sortedGroups"
+        v-show="listFilter === 'all' || dbsInGroup(g.id).length"
         :key="g.id"
         class="folder"
         :class="{
@@ -1232,7 +1304,7 @@ onUnmounted(() => {
             <div class="db-name">
               {{ d.name }}
               <span class="badge" :class="dbBadge(d).cls" :title="availTitle(d)">{{ dbBadge(d).label }}</span>
-              <span v-for="a in jobAlerts(d.id)" :key="a.key" class="badge failed" :title="a.title">{{ a.label }}</span>
+              <span v-for="a in jobStates(d.id)" :key="a.key" class="badge" :class="a.cls" :title="a.title">{{ a.label }}</span>
               <span v-if="!d.has_password" class="badge warn">Mot de passe requis</span>
             </div>
             <div class="db-meta">
@@ -1241,7 +1313,7 @@ onUnmounted(() => {
               <template v-else>Aucune sauvegarde</template>
             </div>
           </div>
-          <div v-if="!dbsInGroup(g.id).length" class="folder-empty">Glisser une base ici</div>
+          <div v-if="listFilter === 'all' && !dbsInGroup(g.id).length" class="folder-empty">Glisser une base ici</div>
         </div>
       </div>
 
@@ -1265,7 +1337,7 @@ onUnmounted(() => {
           <div class="db-name">
             {{ d.name }}
             <span class="badge" :class="dbBadge(d).cls" :title="availTitle(d)">{{ dbBadge(d).label }}</span>
-            <span v-for="a in jobAlerts(d.id)" :key="a.key" class="badge failed" :title="a.title">{{ a.label }}</span>
+            <span v-for="a in jobStates(d.id)" :key="a.key" class="badge" :class="a.cls" :title="a.title">{{ a.label }}</span>
             <span v-if="!d.has_password" class="badge warn">Mot de passe requis</span>
           </div>
           <div class="db-meta">
@@ -1275,6 +1347,8 @@ onUnmounted(() => {
           </div>
         </div>
       </div>
+
+      <p v-if="filterIsEmpty" class="folder-empty">Aucune base pour ce filtre.</p>
 
       <button class="btn list-add" @click="openAdd">Ajouter une base de données</button>
       <div class="list-caption">Une base de données, c'est ce que nous sauvegardons</div>

@@ -1,6 +1,6 @@
 {
   "name": "dataspbackup",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "private": true,
   "description": "Sauvegarde PostgreSQL auto-hébergée avec vérification de restauration fiable pour Supabase",
   "license": "Apache-2.0",
